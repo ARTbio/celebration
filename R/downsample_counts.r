@@ -15,7 +15,7 @@ prob.range = c(0.001, 0.002, 0.004, 0.008, 0.01, 0.02, 0.04, 0.08, 0.1, 0.2, 0.3
 
 
 Downsampling.curve <- function (exprV, prob.range) {
-    res_matrix = data.frame(row.names = rownames(exprV))
+    res_matrix <- data.frame(matrix(ncol = length(prob.range), nrow = length(exprV[,1])))
     for (prob in prob.range) {
         newcol = Down_Sample_Counts(exprV, prob)
         colnames(newcol) <- prob
@@ -23,7 +23,7 @@ Downsampling.curve <- function (exprV, prob.range) {
         }
 #    plot(prob.range, colSums(res_matrix != 0))
 #    plot(prob.range, colSums(res_matrix > 4))
-    return(data.frame(colSums(res_matrix != 0)))
+    return(colSums(res_matrix != 0))
     }
     
 Downsampling.dataframe = data.frame(row.names = prob.range)
