@@ -6,7 +6,7 @@ data.sep = " "
 data.header = TRUE
 method = "Seurat" #what method do you want to use ? scater, Seurat
 mito = FALSE # Is there mitochondrial genes in dataset ? : TRUE or FALSE
-if(mito == TRUE) header.mito = "" #How to recognize mitochondrial genes in gene set. 
+if(mito == TRUE) header.mito = "MT-" #How to recognize mitochondrial genes in gene set. 
 if(method == "Seurat"){
   min.cells = 3 #Keep all genes that at least detect in n cells
   min.genes = 100 #Keep all cells that detect at least n genes
@@ -33,6 +33,7 @@ if(method == "scater") {
   if (mito == TRUE) {
     #retrieve mitochondrial genes in the dataset
     mito.genes = grep(header.mito, rownames(sce))
+    if(length(mito.genes) == 0) stop(paste("No genes match mitochondrial pattern :", header.mito))
     
     #calculate QC metrics
     sce <-
@@ -114,31 +115,31 @@ if(method == "Seurat"){
   if (mito == TRUE) {
     #retrieve mitochondrial genes in the dataset
     mito.genes = grep(header.mito, rownames(sce@raw.data))
-    
-    #QC plot before filtering
-    Seurat::VlnPlot(object = sce, features.plot = c("nGene", "nUMI", "percent.mito"), nCol = 3)
+    if(length(mito.genes) == 0) stop(paste("No genes match mitochondrial pattern :", header.mito))
     
     #calculate QC metrics
     percent.mito <- Matrix::colSums(sce@raw.data[mito.genes, ])/Matrix::colSums(sce@raw.data)
     sce <- AddMetaData(object = sce, metadata = percent.mito, col.name = "percent.mito")
     
+    #QC plot before filtering
+    Seurat::VlnPlot(object = sce, features.plot = c("nGene", "nUMI", "percent.mito"), nCol = 3)
+    
     #Filter low quality cells
-    sce <- FilterCells(sce, subset.names = c("nUMI","nGene","percent.mito"), low.thresholds = c(10000,3000, 0.01), high.thresholds = c(Inf, Inf,0.2))
+    sce <- FilterCells(sce, subset.names = "percent.mito", high.thresholds = 0.2)
     
     #QC plot after filtering
-    Seurat::VlnPlot(object = sce, features.plot = c("nGene", "nUMI", "percent.mito"), nCol = 3)
+    print(Seurat::VlnPlot(object = sce, features.plot = c("nGene", "nUMI", "percent.mito"), nCol = 3))
     
     
   }else{
-    Seurat::VlnPlot(object = sce, features.plot = c("nGene", "nUMI"), nCol = 2)
+    print(Seurat::VlnPlot(object = sce, features.plot = c("nGene", "nUMI"), nCol = 2))
   }
-  
+
   #Some QC plots
   hist(sce@meta.data$nUMI, breaks=20, col="grey80", main="Number of UMI/Cells")
   hist(sce@meta.data$nGene, breaks=20, col="grey80", main="Number of genes detected/Cells")
   
 }
-
 
 dev.off()
 
