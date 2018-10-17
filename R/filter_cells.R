@@ -143,4 +143,12 @@ if(method == "Seurat"){
 
 dev.off()
 
-
+save(sce, file = "../sce.rds")
+write.table(
+  sce@data,
+  file = "../filtered_data.tabular",
+  sep = "\t",
+  quote = F,
+  col.names = T,
+  row.names = T
+)
