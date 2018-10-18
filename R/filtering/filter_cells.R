@@ -1,15 +1,15 @@
 ## Filtering methods on single cell data
 # required packages : scater, SingleCellExperiment, Seurat
 
-data = "/home/lea/Darmanis_data/GBM_raw_gene_counts.csv"
-data.sep = " "
+data = "./test-data/counts.tab"
+data.sep = "\t"
 data.header = TRUE
 method = "Seurat" #what method do you want to use ? scater, Seurat
 mito = FALSE # Is there mitochondrial genes in dataset ? : TRUE or FALSE
 if(mito == TRUE) header.mito = "MT-" #How to recognize mitochondrial genes in gene set. 
 if(method == "Seurat"){
   min.cells = 3 #Keep all genes that at least detect in n cells
-  min.genes = 100 #Keep all cells that detect at least n genes
+  min.genes = 10 #Keep all cells that detect at least n genes
 }
 if(method == "scater") {
   gene_filter = "low.abundances"
@@ -24,12 +24,13 @@ data.counts = read.table(
   header = data.header,
   stringsAsFactors = F,
   sep = data.sep,
-  check.names = FALSE
+  check.names = FALSE,
+  row.names = 1
   
 )
 
 
-pdf(file = "../Filter_cells_plots.pdf", paper = "a4")
+pdf(file = "./test-data/Filter_counts_plots.pdf", paper = "a4")
 if(method == "scater") {
   sce <-
     SingleCellExperiment::SingleCellExperiment(assays = list(counts = as.matrix(data.counts)))
@@ -205,10 +206,10 @@ if (method == "Seurat") {
 
 dev.off()
 
-save(sce, file = "../sce.rds")
+save(sce, file = "./test-data/sce_counts.rds")
 write.table(
   sce@data,
-  file = "../filtered_data.tabular",
+  file = "./test-data/filtered_counts.tab",
   sep = "\t",
   quote = F,
   col.names = T,
