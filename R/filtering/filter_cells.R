@@ -4,7 +4,7 @@
 data = "./test-data/counts.tab"
 data.sep = "\t"
 data.header = TRUE
-method = "Seurat" #what method do you want to use ? scater, Seurat
+method = "scater" #what method do you want to use ? scater, Seurat
 mito = FALSE # Is there mitochondrial genes in dataset ? : TRUE or FALSE
 if(mito == TRUE) header.mito = "MT-" #How to recognize mitochondrial genes in gene set. 
 if(method == "Seurat"){
@@ -12,7 +12,7 @@ if(method == "Seurat"){
   min.genes = 10 #Keep all cells that detect at least n genes
 }
 if(method == "scater") {
-  gene_filter = "low.abundances"
+  gene_filter = "min.cells"
   if (gene_filter == "min.cells" |
       gene_filter == "low.abundances")
     min.cells = 3 #Keep all genes that at least detect in n cells
@@ -26,7 +26,6 @@ data.counts = read.table(
   sep = data.sep,
   check.names = FALSE,
   row.names = 1
-  
 )
 
 
@@ -119,10 +118,10 @@ if(method == "scater") {
     #Verify that the frequency of expression (i.e., number of cells with non-zero expression) and the mean are positively correlated
     scater::plotQC(sce, type = "exprs-freq-vs-mean")
     #Inspecting the most highly expressed genes
-    scater::plotQC(sce, type = "highest-expression", n = 50)
+    scater::plotQC(sce, type = "highest-expression", n = ifelse(nrow(sce) < 50, nrow(sce), 50))
   }
   if (gene_filter == "min.cells") {
-    numcells <- nexprs(sce, byrow = TRUE)
+    numcells <- scater::nexprs(sce, byrow = TRUE)
     #Filter genes detected in less than n cells
     numcells2 <- numcells >= min.cells
     sce <- sce[numcells2, ]
