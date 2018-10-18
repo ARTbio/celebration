@@ -1,0 +1,62 @@
+<tool id="filter_cells_and_genes" name="Filter out cells and genes" version="0.1.0">
+    <description>from raw counts single cell RNAseq expression values"</description>
+    <requirements>
+        <requirement type="package" version="2.3.4r=3.4.2">r-seurat</requirement>
+        <requirement type="package" version="1.6.3r=3.4.2">bioconductor-scater</requirement>
+        <requirement type="package" version="1.0.0r=3.4.2">bioconductor-singlecellexperiment</requirement>
+    </requirements>
+    <stdio>
+        <exit_code range="1:" level="fatal" description="Tool exception" />
+    </stdio>
+    <command detect_errors="exit_code"><![CDATA[
+
+
+]]></command>
+    <inputs>
+        <param name="file" type="data" format="txt" label="Raw counts of expression data"/>
+        <param name="file_sep" type="select" label="Input column separator">
+            <option value="\t" selected="true">Tabs</option>
+            <option value=",">Commas</option>
+            <option value=" ">Whitespaces</option>
+            <option value=".">Dots</option>
+            <option value="_">Underscores</option>
+            <option value="-">Dashes</option>
+        </param>
+        <param name="file_header" type="select" label="Consider first line of input file as header?">
+            <option value="TRUE" selected="true">Yes</option>
+            <option value="FALSE">No</option>
+        </param>
+        <conditional name="option">
+            <param name="is_mito" type="select" label="Are there mitochondrial genes in the expression data ?/nAnd do you want to remove cells that detect more than 20% of mitochondrial genes ?"
+                <option value="FALSE" selected="true">No</option>
+                <option value="TRUE">Yes</option>
+            </param>
+            <when value="TRUE">
+                <param name="header_mito" type="text" label="Regular expression for selection of mitochondrial genes"/>
+
+            </when>
+        </conditional>
+        <conditional name="method">
+            <param name="package" type="select" label="Which package/method do you want to use ?"
+                <option value="scater" selected="true">scater</option>
+                <option value="seurat">Seurat</option>
+            </param>
+            <when value="scater">
+                <param name="gene_filter" type="select" label="How do you want to filter out genes ?">
+                    <option value="low.abundances" selected="true">low abundances genes based on library size</option>
+                    <option value="min.cells">genes that aren't detected in a certain number of cells</option>
+                </param>
+                <param name="min.cells" type="integer" label="What threshold do you want to apply ?"/>
+            </when>
+            <when value="scater">
+                <param name="min.genes" type="integer" label="Keep all cells that detect at least n genes:">
+                <param name="min.cells" type="integer" label="Keep all genes that are detected in at least n cells:"/>
+            </when>
+        </conditional>
+    </inputs>
+    <outputs>
+        <data name="output_plot" format="pdf" label="PDF plots from ${on_string}"/>
+        <data name="output_Robject" format="RData" label="RData from ${on_string}"/>
+        <data name="output_matrix" format="tabular" label="Filtered expression matrix from ${on_string}"/>
+    </outputs>
+
