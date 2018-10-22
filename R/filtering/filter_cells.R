@@ -1,11 +1,11 @@
 ## Filtering methods on single cell data
 # required packages : scater, SingleCellExperiment, Seurat
 
-data = "./test-data/counts.tab"
+data = "./test-data/counts_with_mito.tab"
 data.sep = "\t"
 data.header = TRUE
 method = "scater" #what method do you want to use ? scater, Seurat
-mito = FALSE # Is there mitochondrial genes in dataset ? : TRUE or FALSE
+mito = TRUE # Is there mitochondrial genes in dataset ? : TRUE or FALSE
 if(mito == TRUE) header.mito = "MT-" #How to recognize mitochondrial genes in gene set. 
 if(method == "Seurat"){
   min.cells = 3 #Keep all genes that at least detect in n cells
@@ -29,7 +29,7 @@ data.counts = read.table(
 )
 
 
-pdf(file = "./test-data/Filter_counts_plots.pdf", paper = "a4")
+pdf(file = "./test-data/Filter_counts_with_mito_plots.pdf", paper = "a4")
 if(method == "scater") {
   sce <-
     SingleCellExperiment::SingleCellExperiment(assays = list(counts = as.matrix(data.counts)))
@@ -72,7 +72,7 @@ if(method == "scater") {
     )
     scater::plotQC(sce, type = "exprs-freq-vs-mean")
     #Inspecting the most highly expressed genes
-    scater::plotQC(sce, type = "highest-expression", n = 50)
+    scater::plotQC(sce, type = "highest-expression", n = ifelse(nrow(sce) < 50, nrow(sce), 50))
     
   } else{
     #calculate QC metrics
@@ -160,13 +160,6 @@ if (method == "Seurat") {
                   metadata = percent.mito,
                   col.name = "percent.mito")
     
-    #QC plot before filtering
-    Seurat::VlnPlot(
-      object = sce,
-      features.plot = c("nGene", "nUMI", "percent.mito"),
-      nCol = 3
-    )
-    
     #Filter low quality cells
     sce <-
       FilterCells(sce, subset.names = "percent.mito", high.thresholds = 0.2)
@@ -205,10 +198,10 @@ if (method == "Seurat") {
 
 dev.off()
 
-save(sce, file = "./test-data/sce_counts.rds")
+save(sce, file = "./test-data/sce_counts_with_mito.rds")
 write.table(
   sce@data,
-  file = "./test-data/filtered_counts.tab",
+  file = "./test-data/filtered_counts_with_mito.tab",
   sep = "\t",
   quote = F,
   col.names = T,
