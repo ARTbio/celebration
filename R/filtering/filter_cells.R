@@ -12,7 +12,7 @@ if(method == "Seurat"){
   min.genes = 10 #Keep all cells that detect at least n genes
 }
 if(method == "scater") {
-  gene_filter = "min.cells"
+  gene_filter = "low.abundances"
   if (gene_filter == "min.cells" |
       gene_filter == "low.abundances")
     min.cells = 3 #Keep all genes that at least detect in n cells
@@ -206,11 +206,16 @@ save(sce,
        sep = "_"
      ))
 
+
+if (method == "scater") {
+  filtered_data_counts = sce@assays$data$counts
+} else filtered_data_counts = sce@data
+
 write.table(
-  sce@data,
+  filtered_data_counts,
   file = paste(
     tools::file_path_sans_ext(data),
-    ifelse(method == "scater", c(method, gene_filter, sep = "_"), method),
+    ifelse(method == "scater", paste(method, gene_filter, sep = "_"), method),
     "filtered.tab",
     sep = "_"
   ),
