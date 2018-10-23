@@ -1,21 +1,19 @@
 ## Filtering methods on single cell data
 # required packages : scater, SingleCellExperiment, Seurat
 
-data = "./test-data/counts_with_mito.tab"
-data.sep = "\t"
-data.header = TRUE
-method = "scater" #what method do you want to use ? scater, Seurat
-mito = TRUE # Is there mitochondrial genes in dataset ? : TRUE or FALSE
-if(mito == TRUE) header.mito = "MT-" #How to recognize mitochondrial genes in gene set. 
+data = "./test-data/counts_with_mito.tab" #input file
+data.sep = "\t"                           #input file separator
+data.header = TRUE                        #Does your input file have a header (column names) or not ?
+method = "scater"                         #what method do you want to use ? scater, Seurat
+mito = TRUE                               # Is there mitochondrial genes in dataset ? : TRUE or FALSE
+if(mito == TRUE) header.mito = "MT-"      #How to recognize mitochondrial genes in gene set. 
 if(method == "Seurat"){
-  min.cells = 3 #Keep all genes that at least detect in n cells
-  min.genes = 10 #Keep all cells that detect at least n genes
+  min.cells = 3                           #Keep all genes that at least detect in n cells
+  min.genes = 10                          #Keep all cells that detect at least n genes
 }
 if(method == "scater") {
-  gene_filter = "low.abundances"
-  if (gene_filter == "min.cells" |
-      gene_filter == "low.abundances")
-    min.cells = 3 #Keep all genes that at least detect in n cells
+  gene_filter = "low.abundances"          #what method do you want to use for filter genes ? low.abundances or min.cells
+  min.cells = 3                           #Keep all genes that at least detect in n cells, threshold for gene filtering
 }
 
 #Import dataset
