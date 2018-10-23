@@ -29,7 +29,7 @@ data.counts = read.table(
 )
 
 
-pdf(file = "./test-data/Filter_counts_with_mito_plots.pdf", paper = "a4")
+pdf(file = paste(tools::file_path_sans_ext(data), ifelse(method == "scater", paste(method, gene_filter, sep = "_"),method), "filter_plots.pdf", sep = "_"), paper = "a4")
 if(method == "scater") {
   sce <-
     SingleCellExperiment::SingleCellExperiment(assays = list(counts = as.matrix(data.counts)))
@@ -70,7 +70,7 @@ if(method == "scater") {
       col = "grey80",
       xlab = "Proportion of counts in mitochondrial genes"
     )
-    scater::plotQC(sce, type = "exprs-freq-vs-mean")
+    #scater::plotExprsFreqVsMean(sce, feature_controls = rowData(sce)$is_feature_control_Mito) #Error due to feature controls in rowData, resolved in version with R>=3.5
     #Inspecting the most highly expressed genes
     scater::plotQC(sce, type = "highest-expression", n = ifelse(nrow(sce) < 50, nrow(sce), 50))
     
@@ -198,10 +198,22 @@ if (method == "Seurat") {
 
 dev.off()
 
-save(sce, file = "./test-data/sce_counts_with_mito.rds")
+save(sce,
+     file = paste(
+       tools::file_path_sans_ext(data),
+       ifelse(method == "scater", paste(method, gene_filter, sep = "_"), method),
+       "filter_sce.rds",
+       sep = "_"
+     ))
+
 write.table(
   sce@data,
-  file = "./test-data/filtered_counts_with_mito.tab",
+  file = paste(
+    tools::file_path_sans_ext(data),
+    ifelse(method == "scater", c(method, gene_filter, sep = "_"), method),
+    "filtered.tab",
+    sep = "_"
+  ),
   sep = "\t",
   quote = F,
   col.names = T,
