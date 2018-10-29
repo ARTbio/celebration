@@ -1,20 +1,28 @@
-## Filtering methods on single cell data
-# required packages : scater, SingleCellExperiment, Seurat
+## Setup R error handling to go to stderr
+options(
+  show.error.messages = F,
+  error = function () {
+    cat(geterrmessage(), file = stderr())
+    q("no", 1, F)
+  }
+)
 
-data = "./test-data/counts_with_mito.tab" #input file
-data.sep = "\t"                           #input file separator
-data.header = TRUE                        #Does your input file have a header (column names) or not ?
-method = "scater"                         #what method do you want to use ? scater, Seurat
-mito = TRUE                               # Is there mitochondrial genes in dataset ? : TRUE or FALSE
-if(mito == TRUE) header.mito = "MT-"      #How to recognize mitochondrial genes in gene set. 
-if(method == "Seurat"){
-  min.cells = 3                           #Keep all genes that at least detect in n cells
-  min.genes = 10                          #Keep all cells that detect at least n genes
-}
-if(method == "scater") {
-  gene_filter = "low.abundances"          #what method do you want to use for filter genes ? low.abundances or min.cells
-  min.cells = 3                           #Keep all genes that at least detect in n cells, threshold for gene filtering
-}
+option_list <- list(
+  optparse::make_option(c("-f", "--file"), type="character", help="Path to the input file"),
+  optparse::make_option(c("-c", "--colnames"), type="logical", help="Consider first line as header"),
+  optparse::make_option(c("-s", "--sep"), type="character", help="Input file separator"),
+  optparse::make_option(c("-m", "--is_mito"), type="logical", help="There are mitochondrial genes in the dataset"),
+  optparse::make_option("--header_mito", type="character", help="Prefixe of mitochondrial genes in the dataset. e.g. 'MT-'"),
+  optparse::make_option(c("-p", "--package"), type="character", help="Name of the package used for the filtering : scater or Seurat"),
+  optparse::make_option(c("-g", "--gene_filter"), type="character", help="Type of filtering : low.abundances or min.cells"),
+  optparse::make_option("--min_cells", type = "double", help="Threshold for the gene filtering. e.g. '3'"),
+  optparse::make_option("--min_genes", type = "double", help="Threshold for the cell filtering. e.g. '5'"),
+  optparse::make_option("--output_matrix", type = "character", help="Path to the filtered matrix"),
+  optparse::make_option("--output_pdf", type = "character", help="Path to the pdf file with plots")
+)
+
+parser <- optparse::OptionParser(usage = "%prog [options] file", option_list = option_list)
+args = optparse::parse_args(parser)
 
 #Import dataset
 data.counts = read.table(
@@ -27,107 +35,119 @@ data.counts = read.table(
 )
 
 
-pdf(file = paste(tools::file_path_sans_ext(data), ifelse(method == "scater", paste(method, gene_filter, sep = "_"),method), "filter_plots.pdf", sep = "_"), paper = "a4")
-if(method == "scater") {
+pdf(file = args$output_pdf, paper = "a4")
+if (args$package == "scater") {
   sce <-
     SingleCellExperiment::SingleCellExperiment(assays = list(counts = as.matrix(data.counts)))
   
-  if (mito == TRUE) {
-    #retrieve mitochondrial genes in the dataset
-    mito.genes = grep(header.mito, rownames(sce))
+  if (args$is_mito == TRUE) {
+    ##retrieve mitochondrial genes in the dataset
+    mito.genes = grep(args$header_mito, rownames(sce))
     if (length(mito.genes) == 0)
-      stop(paste("No genes match mitochondrial pattern :", header.mito))
+      stop(paste(
+        "No genes match mitochondrial pattern :",
+        args$header_mito
+      ))
     
-    #calculate QC metrics
+    ##calculate QC metrics
     sce <-
       scater::calculateQCMetrics(sce, feature_controls = list(Mito = mito.genes))
     
-    #search which cells had a high level of expressed mitochondrial genes
+    ##search which cells had a high level of expressed mitochondrial genes
     high.mito <-
-      scater::isOutlier(sce$pct_counts_Mito, nmads = 3, type = "higher")
+      scater::isOutlier(SingleCellExperiment::colData(sce)[, "pct_counts_Mito"],
+                        nmads = 3,
+                        type = "higher")
     
-    #remove those cells
-    sce <- sce[,!high.mito]
+    ##remove those cells
+    sce <- sce[, !high.mito]
     
-    #some QC plots
+    ##some QC plots
     hist(
-      sce$total_counts,
+      SingleCellExperiment::colData(sce)[, "total_counts"],
       breaks = 20,
       col = "grey80",
+      main = "",
       xlab = "Log-total UMI count"
     )
     hist(
-      sce$log10_total_features,
+      SingleCellExperiment::colData(sce)[, "log10_total_features"],
       breaks = 20,
       col = "grey80",
+      main = "",
       xlab = "Log-total number of expressed features"
     )
     hist(
-      sce$pct_counts_Mito,
+      SingleCellExperiment::colData(sce)[, "pct_counts_Mito"],
       breaks = 20,
       col = "grey80",
+      main = "",
       xlab = "Proportion of counts in mitochondrial genes"
     )
-    #scater::plotExprsFreqVsMean(sce, feature_controls = rowData(sce)$is_feature_control_Mito) #Error due to feature controls in rowData, resolved in version with R>=3.5
-    #Inspecting the most highly expressed genes
-    scater::plotQC(sce, type = "highest-expression", n = ifelse(nrow(sce) < 50, nrow(sce), 50))
     
-  } else{
-    #calculate QC metrics
+    ##scater::plotExprsFreqVsMean(sce, feature_controls = rowData(sce)[,"is_feature_control_Mito"]) #Error due to feature controls in rowData, resolved in version with R superior to 3.5
+    ##Inspecting the most highly expressed genes
+    print(scater::plotQC(sce, type = "highest-expression", n = ifelse(nrow(sce) < 50, nrow(sce), 50)))
+    
+  } else {
+    ##calculate QC metrics
     sce = scater::calculateQCMetrics(sce)
     
-    #search which cells had a low counts
+    ##search which cells had a low counts
     libsize.drop <-
-      scater::isOutlier(sce$total_counts,
-                        nmads = 3,
-                        type = "lower",
-                        log = TRUE)
-    
-    #search for cells with few detected genes
+      scater::isOutlier(
+        SingleCellExperiment::colData(sce)[, "total_counts"],
+        nmads = 3,
+        type = "lower",
+        log = TRUE
+      )
+    ##search for cells with few detected genes
     feature.drop <-
       scater::isOutlier(
-        sce$total_features,
+        SingleCellExperiment::colData(sce)[, "total_features"],
         nmads = 3,
         type = "lower",
         log = TRUE
       )
     
-    #remove low quality cells
-    sce <- sce[,!(libsize.drop | feature.drop)]
-    print(data.frame(
-      ByLibSize = sum(libsize.drop),
-      ByFeature = sum(feature.drop),
-      Remaining = ncol(sce)
-    ))
+    ##remove low quality cells
+    sce <- sce[, !(libsize.drop | feature.drop)]
+    cat("Remaining", ncol(sce), "cells.")
     
-    #Some QC plots
+    ##Some QC plots
     hist(
-      sce$total_counts,
+      SingleCellExperiment::colData(sce)[, "total_counts"],
       breaks = 20,
       col = "grey80",
+      main = "",
       xlab = "Log-total UMI count"
     )
     hist(
-      sce$log10_total_features,
+      SingleCellExperiment::colData(sce)[, "log10_total_features"],
       breaks = 20,
       col = "grey80",
+      main = "",
       xlab = "Log-total number of expressed features"
     )
-    #Verify that the frequency of expression (i.e., number of cells with non-zero expression) and the mean are positively correlated
-    scater::plotQC(sce, type = "exprs-freq-vs-mean")
-    #Inspecting the most highly expressed genes
-    scater::plotQC(sce, type = "highest-expression", n = ifelse(nrow(sce) < 50, nrow(sce), 50))
-  }
-  if (gene_filter == "min.cells") {
-    numcells <- scater::nexprs(sce, byrow = TRUE)
-    #Filter genes detected in less than n cells
-    numcells2 <- numcells >= min.cells
-    sce <- sce[numcells2, ]
-  }
-  if (gene_filter == "low.abundances") {
-    ave.counts <- scater::calcAverage(sce)
+    ##Verify that the frequency of expression (i.e., number of cells with non-zero expression) and the mean are positively correlated
+    print(scater::plotQC(sce, type = "exprs-freq-vs-mean"))
+    ##Inspecting the most highly expressed genes
+    print(scater::plotQC(sce, type = "highest-expression", n = ifelse(nrow(sce) < 50, nrow(sce), 50)))
     
+  }
+  
+  if (args$gene_filter == "min.cells") {
+    numcells <- scater::nexprs(sce, byrow = TRUE)
+    ##Filter genes detected in less than n cells
+    numcells2 <- numcells >=args$min_cells
+    sce <- sce[numcells2, ]
+    cat("Keep", nrow(sce) , "genes.")
+  }
+  
+  if (args$gene_filter == "low.abundances") {
+    ave.counts <- scater::calcAverage(sce)
     num.cells <- scater::nexprs(sce, byrow = TRUE)
+    
     smoothScatter(
       log10(ave.counts),
       num.cells,
@@ -135,88 +155,96 @@ if(method == "scater") {
       xlab = expression(Log[10] ~ "average count")
     )
     
-    to.keep <- num.cells > min.cells
-    sce <- sce[to.keep, ]
-    print(summary(to.keep))
+    hist(
+      log10(ave.counts),
+      breaks = 20,
+      main = "",
+      col = "grey80",
+      xlab = expression(Log[10] ~ "average count")
+    )
+    abline(
+      v = log10(args$min_cells),
+      col = "red",
+      lwd = 2,
+      lty = 2
+    )
+    
+    to.keep <- ave.counts >=args$min_cells
+    sce <- sce[to.keep,]
+    cat("Keep", nrow(sce) , "genes.")
   }
+  
+  
 }
-if (method == "Seurat") {
-  sce = Seurat::CreateSeuratObject(raw.data = data.counts,
-                                   min.cells = min.cells,
-                                   min.genes = min.genes)
-  if (mito == TRUE) {
-    #retrieve mitochondrial genes in the dataset
-    mito.genes = grep(header.mito, rownames(sce@raw.data))
+if (args$package == "Seurat") {
+  sce = Seurat::CreateSeuratObject(
+    raw.data = data.counts,
+    min.cells =args$min_cells,
+    min.genes =args$min_genes
+  )
+  
+  if (args$is_mito == TRUE) {
+    ##retrieve mitochondrial genes in the dataset
+    mito.genes = grep(args$header_mito, rownames(sce@raw.data))
     if (length(mito.genes) == 0)
-      stop(paste("No genes match mitochondrial pattern :", header.mito))
+      stop(paste(
+        "No genes match mitochondrial pattern :",
+        args$header_mito
+      ))
     
-    #calculate QC metrics
+    ##calculate QC metrics
     percent.mito <-
-      Matrix::colSums(sce@raw.data[mito.genes,]) / Matrix::colSums(sce@raw.data)
+      Matrix::colSums(sce@raw.data[mito.genes, ]) / Matrix::colSums(sce@raw.data)
     sce <-
-      AddMetaData(object = sce,
-                  metadata = percent.mito,
-                  col.name = "percent.mito")
+      Seurat::AddMetaData(object = sce,
+                          metadata = percent.mito,
+                          col.name = "percent.mito")
     
-    #Filter low quality cells
+    ##Filter low quality cells
     sce <-
-      FilterCells(sce, subset.names = "percent.mito", high.thresholds = 0.2)
+      Seurat::FilterCells(sce, subset.names = "percent.mito", high.thresholds = 0.2)
     
-    #QC plot after filtering
+    ##QC plot after filtering
     print(Seurat::VlnPlot(
       object = sce,
       features.plot = c("nGene", "nUMI", "percent.mito"),
       nCol = 3
     ))
-    
-    
-  } else{
+  } else {
     print(Seurat::VlnPlot(
       object = sce,
       features.plot = c("nGene", "nUMI"),
       nCol = 2
     ))
+    
   }
-  
-  #Some QC plots
+  ##Some QC plots
   hist(
-    sce@meta.data$nUMI,
+    sce@meta.data[, "nUMI"],
     breaks = 20,
+    main = "",
     col = "grey80",
-    main = "Number of UMI/Cells"
+    xlab = "Number of UMI/Cells"
   )
   hist(
-    sce@meta.data$nGene,
+    sce@meta.data[, "nGene"],
     breaks = 20,
     col = "grey80",
-    main = "Number of genes detected/Cells"
+    main = "",
+    xlab = "Number of genes detected/Cells"
   )
   
 }
-
 dev.off()
 
-save(sce,
-     file = paste(
-       tools::file_path_sans_ext(data),
-       ifelse(method == "scater", paste(method, gene_filter, sep = "_"), method),
-       "filter_sce.rds",
-       sep = "_"
-     ))
-
-
-if (method == "scater") {
+if (args$package == "scater") {
   filtered_data_counts = sce@assays$data$counts
-} else filtered_data_counts = sce@data
+} else
+  filtered_data_counts = sce@data
 
 write.table(
   filtered_data_counts,
-  file = paste(
-    tools::file_path_sans_ext(data),
-    ifelse(method == "scater", paste(method, gene_filter, sep = "_"), method),
-    "filtered.tab",
-    sep = "_"
-  ),
+  file = args$output_matrix,
   sep = "\t",
   quote = F,
   col.names = T,
