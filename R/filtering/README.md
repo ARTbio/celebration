@@ -1,4 +1,4 @@
-#What it does
+# What it does
 
  Filter_cells_and_genes takes a tabular table of raw read counts, each column corresponding to a sample count, and returns (1) a PDF with QC (quality controls) plots and (2) a filtered table of counts.  
  
@@ -15,7 +15,7 @@
     - Filter out genes based on its average count (which is adjust for library size between cells). It is more stringent.  
  - Using R package Seurat : Remove all genes that aren't detected in at least n cells.  
 
-#Generation of output test files 
+# Generation of output test files 
 
 The different outputs in `test-data/` have been generated thanks to the Rscript filter_cells.R and either of two inputs files `test-data/counts.tab` or `test-data/counts_with_mito.tab`
 
