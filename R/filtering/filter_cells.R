@@ -26,10 +26,10 @@ args = optparse::parse_args(parser)
 
 #Import dataset
 data.counts = read.table(
-  data,
-  header = data.header,
+  args$file,
+  header = args$colnames,
   stringsAsFactors = F,
-  sep = data.sep,
+  sep = ifelse(args$sep == "tab", "\t", args$sep),
   check.names = FALSE,
   row.names = 1
 )
