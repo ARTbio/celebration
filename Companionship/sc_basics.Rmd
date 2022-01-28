@@ -1,0 +1,508 @@
+---
+title: "Analyse single-cell"
+output:
+  html_document: 
+    highlight: tango 
+    theme: cerulean
+    toc: yes
+    toc_depth: 3
+    code_folding: show
+  pdf_document: 
+    highlight: tango
+    theme: cerulean
+    toc: yes
+    toc_depth: 3
+    code_folding: show #knit pdf not working must install latex
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+	eval = TRUE,
+	echo = TRUE,
+	fig.align = "center",
+	fig.height = 5,
+	fig.keep = "all",
+	fig.width = 12,
+	message = FALSE,
+	warning = FALSE,
+	results = "asis"
+)
+set.seed(5)
+```
+
+```{r echo=TRUE}
+## Import des packages
+library(Seurat)
+library(ggraph)
+library(ggplot2)
+library(gridExtra)
+library(RColorBrewer)
+library(biomaRt)
+require(plyr)
+require(dplyr)
+require(magrittr)
+library(clustree)
+```
+
+
+# Analyse single cell via Seurat
+
+Une analyse single-cell RNA seq classique consiste a identifier des populations de cellules ainsi que les genes marqueurs associes. Elle peut egalement rechercher l'effet d'un traitement ou d'une condition grace aux methodes d'analyse differentielle.  
+
+
+## Import des fichiers
+
+### Matrice d'expression
+
+Il faut importer en premier les donnees. Elles sont généralement sous la forme de 3 fichiers :  
+
+- la matrice d'expression `matrix.mtx` : fichier de trois colonnes (indice du transcriptome, indice du gene, niveau d'expression associe)
+- le nom des transcriptomes `barcodes.tsv` : fichier a une colonne avec le nom des transcriptomes (cellules, barcodes)
+- le nom des genes en format `genes.tsv` : fichier de trois colonnes (geneID de l'annotation gtf utilise, gene name, "Gene Expression")
+
+La fonction `Read10X` de Seurat permet de creer a partir de ces fichiers la matrice d'expression en format `dgCMatrix`. C'est une sparse matrix utilisee pour un traitement efficace des grandes matrices.
+
+```{r Import}
+
+### Import expression matrix
+tenX_matrix <- Read10X(data.dir = "/home/lea/SingleCell_comp/Inputs/filtered_gene_bc_matrices/hg19", #path to the directory containing the three 10X files (matrix.mtx, genes.tsv (or features.tsv depending on the CellRanger version), barcodes.tsv)
+                       gene.column = 1) #choice of the genes.tsv column that will determine the names of the genes in the expression matrix
+
+##matrix dimension : first value is the number of row (genes) and second value is the number of column (sample/barcodes)
+dim(tenX_matrix)
+```
+
+
+Il est preferable d'utiliser la colonne composee uniquement de gene ID lors de l'analyse (colonne 1) et de n'utiliser les gene names que lors de l'etape de l'annotation des genes marqueurs. En effet la colonne 2 de `genes.tsv` est en fait composee de gene name et de gene ID. Sachant surtout que plusieurs gene ID peuvent correspondre a un seul gene name, cela complexifie enormement l'etape d'annotation.  
+Si on choisit la colonne 2, les duplicats dans les genes names sont gerees avec la fonction `make.unique` qui detecte les duplicats puis rajoute des `.1, .2, ..., .n` apres chaque occurence. La premiere occurence n'est pas modifiee.  
+
+Ici on utilise les datasets tests de Seurat que l'on peut retrouver sur le [tutoriel de Seurat](https://satijalab.org/seurat/articles/pbmc3k_tutorial.html).  
+
+Si le format de la matrice d'expression n'est pas en format trois fichiers mais un fichier contenant une table (*n* genes x *n* barcodes), on peut passer directement a l'etape suivante.  
+
+### Annotation biomaRt
+
+On va ensuite importer la base de donnees biomart qui nous servira ensuite a annoter les genes de notre analyse. Cela permettra notamment de passer d'un Ensembl gene ID a un gene name. Les données de Seurat etant en hg19 on recupere la base de donnees pour cette annotation la.  
+
+```{r Biomart, echo=TRUE}
+# Import of the biomart database for hg19
+ensembl_hg19 <- useEnsembl(biomart = "genes",                  #import ensembl genes database
+                           dataset = "hsapiens_gene_ensembl",  #genome
+                           GRCh = 37)                          #genome version, only 38 or 37 are accepted for now
+
+# Recovering attributes according to our gene list (genes present in our expression matrix)
+annotated_hg19 <- getBM(attributes = c("ensembl_gene_id",
+                                       "external_gene_name", 
+                                       "description",
+                                       "gene_biotype", 
+                                       "chromosome_name"),    #informations to retrieve
+                           filters = "ensembl_gene_id",       #which variable to choose for the filtering
+                           values = rownames(tenX_matrix),    #values that will filter the database
+                           mart = ensembl_hg19)               #database
+
+#preview of the resulting dataframe
+knitr::kable(head(annotated_hg19), "simple")
+
+```
+Nous avons obtenu un dataframe avec les informations relatives aux genes presents dans notre matrice d'expression.  
+
+## Creation de l'objet Seurat
+
+Ensuite grâce a la fonction `CreateSeuratObject` on va pouvoir importer cette matrice dans un objet Seurat qui va être la base de notre analyse. Toutes les differentes etapes vont être associees a cet objet qui est un objet S4 (arborescence d'autres objets plus petits, dataframe, vecteurs...), specifique a Seurat appele un `SeuratObject`.  
+
+```{r CreateSeuratObject, results='markup'}
+### Creation of the Seurat Object
+pbmc_small <- CreateSeuratObject(tenX_matrix,                    #expression matrix
+                                 project = "Seurat data test",   #name of the project
+                                 assay = "RNA",                  #name of the initial assay, (others can be created during the analysis), default is RNA
+                                 names.field = 1,                #associated with the names.delim, it allows to separate the name of the barcode when this one is composed of several information ex: BARCODE_CLUSTER_CELLTYPE and to choose after split on the names.delim which part we choose as the barcode name
+                                 names.delim = "_",              #character that allows to dissociate the different information contained in the barcode names
+                                 meta.data = NULL,               #we can add the metadata on the transcriptomes with a dataframe where the barcodes are in line and the different information in column
+                                 min.cells = 0,                  #filtering genes that are not detected in less than min.cells
+                                 min.features = 1)               #filtering cells that do not detect at least min.features, here we filter all barcodes that detect no gene
+
+pbmc_small # Small presentation of the Seurat object in R console
+
+# Discovery of SeuratObject
+str(pbmc_small)
+dim(pbmc_small@assays$RNA@counts)
+dim(pbmc_small@assays$RNA@data)
+
+knitr::kable(head(pbmc_small@meta.data), "simple") # preview of the cell metadata
+```
+
+
+Ici on peut donc voir apparaitre plusieurs slots differents :  
+
+- assays : slot general qui comprendra les differentes informations de chaque etude. Elles sont composees de plusieurs choses : 
+    - la matrice d'expression de depart (`@counts`), habituellement des raw counts ou raw UMI
+    - celle qui va "subir" toutes les modifications (filtres, normalisation, etc) (`@data`) 
+    - dataframe qui sera cree lors du scaling des data (`@scale_data`)
+    - prefixe utilise pour chaque calcul qui utilisera cet assay (etude) (`@key`)
+    - vecteur des noms de genes qui seront determines comme ayant une expression variable (`@var.features`)
+    - dataframe associe aux genes avec les differentes metadata (`@meta.features`)
+    
+- meta.data : regroupe toutes les informations concernant les cellules. Au depart Seurat va calculer la taille de la librarie (nCount_RNA, ou le nombre d'UMI) et le nombre de genes detectes (nFeatures_RNA) pour chaque cellule. Si on lui renseigne un dataframe dans le parametre `meta.data` de la fonction `CreateSeuratObject`, ses colonnes seront ajoutees apres celles calculées par Seurat.  
+
+- active.assay : etude utilise par defaut
+- active.ident : identite des cellules par defaut, ici le nom du projet donne, stocke aussi sous la colonne `orig.ident` dans les metadata
+
+La navigation dans les differents slots se fait via `@` ou `$`. Chaque slot principal est accessible via le `@`, c'est a dire `nomobjet@slotprincipal` pour aller plus loin dans l'arborescence des slots, le plus souvent les objets complexes sont accessibles avec un `@` (dgCMatrix, dataframe) et les listes, vecteurs sont accessibles via `$`. Au moindre doute, on peut se referer au resultat de la commande `str`. 
+
+## Pre-processing
+
+Les etapes du preprocessing servent a nettoyer les données afin de ne pas fausser les résultats des analyses en aval (analyse du regroupement des cellules, des marqueurs, analyses differentielles d'expression).  
+
+### Filtrage des cellules de faible qualite
+
+La premiere etape est de filtrer les cellules qui sont de pauvre qualite. Cela peut concerner les cellules qui ont explose lors la prepation de la librarie, les *beads* vides ou qui contiennent de l'ARN ambiant, etc... On va pouvoir se baser sur differents parametres comme le nombre de genes detectes, le nombre d'UMI, le pourcentage de genes de la mitochondrie exprimes... 
+
+#### Calcul du pourcentage de genes mitochondriaux
+
+Un haut taux d'expression des genes du genome MT peut exprimer une cellule en apoptose.  
+
+Grâce a la fonction `PercentageFeatureSet`, on calcule pour chaque cellule du % d'expression des genes mitochondriaux parmi tous les genes exprimes. Si on utilise les gene names, on peut directement utilise le parametre `pattern` en renseignant "*^MT-*" pour capturer tous les genes commencant par "*MT-*". S'il n'y a pas de pattern dans les noms de genes, grâce au parametre `features` on lui renseigne directement un vecteur contenant les genes presents sur le genome MT. On peut s'aider de l'annotation Biomart en recuperant tous les genes present sur le chromosome MT si les ID (ou les gene names) n'ont pas de prefixe pour les differencier. La fonction `PercentageFeatureSet` ajoute une colonne avec les valeurs de % dans les metadata des cellules (`nomobjet@meta.data`).
+
+On considere generalement une cellule en apoptose lorsque le transcriptome detecte plus de 20% les genes du genome MT. Certains sont plus stringeant en abaissant ce seuil a 10%.  
+
+
+```{r MitoGenes}
+##Retrieve genes from the MT genome using biomart
+genes_MT <- annotated_hg19$ensembl_gene_id[annotated_hg19$chromosome_name == "MT"]
+
+
+pbmc_small <- PercentageFeatureSet(pbmc_small,
+                                   features = genes_MT,        # vectors of gene names present on the MT genome
+                                   col.name = "percent_mito",  # Defines the name of the new column generated in the metadata of the Seurat object
+                                   assay = "RNA")
+
+###Violin plot of QC (Quality Controls)
+VlnPlot(object = pbmc_small,
+        features = c("nCount_RNA", "nFeature_RNA", "percent_mito"), # Parameters to plot (either gene expression or continuous variable in cell metadata)
+        ncol = 3,                                                   # Number of columns if several figures are to be ploted
+        pt.size = 0.01)                                             # Point size
+
+###Graphical representation of QC
+
+ggplot(pbmc_small@meta.data,
+       aes(y = nCount_RNA,
+           x = nFeature_RNA,
+           color = percent_mito)) +
+  geom_point() +
+  geom_hline(yintercept = 650, linetype = 'dotted') + 
+  geom_vline(xintercept = 300, linetype = 'dotted') +
+  scale_y_log10() +
+  scale_color_gradient2(low = "green", 
+                        high = "red", 
+                        mid = "yellow") +
+  ggtitle("QC plot", "Number of detected genes in function of number of UMI")+
+  labs(y = "Number of UMI per cell", x = "Number of detected genes by cell")
+
+```
+
+Grâce a ces plots de controles qualites on va pouvoir essayer de differencier les cellules de bonnes qualites des autres. Pour ce faire, on regarde les differentes distributions et on essaye d'identifier deux populations on etabli le seuil comme etant la valeur qui va les separer. Sachant que les cellules de pauvre qualite sont celles qui vont exprimer peu de genes, faiblement et/ou exprimer fortement les genes du genome MT.  
+
+#### Seuils des differents filtres
+
+On peut donc identifier les cellules outliers. Dans le dernier plot, on voit un nuage de point qui se decroche du reste des cellules,. Sur le dernier violin plot pour la distribution du `percent_mito` on peut choisir le seuil a 10% car les outliers se trouvent plutot au dessus de 10%.
+
+Pour filtrer un objet Seurat on utilise simplement la fonction `subset` ou on filtre selon les valeurs contenues dans le dataframe des metadata.
+
+On va retirer toutes les cellules : 
+
+- dont la taille de la librarie est inferieur a 650 UMI
+- qui detectent moins de 300 genes
+- dont le pourcentage de genes du genome MT exprimes depasse 10%.
+
+> Attention le `&` dans la commande subset correspond a un `OU` et non un `ET`. Le pipe ne fonctionne pas quand on utilise subset avec un objet seurat
+
+```{r QCFilter}
+#filtering SeuratObject
+pbmc_small <- subset(pbmc_small,
+                     percent_mito < 10 &
+                       nCount_RNA > 650 &
+                       nFeature_RNA > 300)
+
+#plot
+ggplot(pbmc_small@meta.data, 
+               aes(y = nCount_RNA,
+                   x = nFeature_RNA,
+                   color = percent_mito)) +
+  geom_point() +
+  scale_y_log10() +
+  scale_color_gradient2(low = "green", 
+                        high = "red", 
+                        mid = "yellow") +
+  ggtitle("QC plot after filtering", "Number of detected genes in function of number of UMI")+
+  labs(y = "Number of UMI per cell", x = "Number of detected genes by cell")
+
+#update object in R console
+pbmc_small
+
+```
+
+Cette manipulation de l'objet Seurat va faire que toutes les cellules non retenues seront retirees des differentes matrices d'expression (`@counts` et `@data`) ainsi que du slot `meta.data`. Environ 100 cellules ont ete considerees comme etant de faible qualite et ont ete retirees de l'analyse.
+
+### Normalisation des donnees
+
+La normalisation des donnees permet de s'affranchir des biais specifiques aux cellules (ex : sequencing depth, amplification, GC content). Elle permet de rendre comparable les libraries. Pour cela on va utiliser la fonction de Seurat, `NormalizeData` qui se base sur l'hypothese que chaque cellule contient la même quantite d'ARN. Avec la methode `logNormalize`, chaque UMI est normalise comme suit, pour chaque cellule : 
+
+> norm_UMI = log2(UMI / nCount_RNA) * scale_factor +1)
+
+Le `scale_factor` est defini par defaut a 10 000, le plus souvent on utilise la mediane de la taille des libraries (= nombre total d'UMI par cellule, = nCount_RNA dans les meta.data). Si le scale factor est egal a 1e6 alors on obtiendrait des log2(CPM+1). *CPM : Count Per Million*  
+
+```{r NormData}
+
+#inter-cell normalization
+pbmc_small <- NormalizeData(pbmc_small,                                   #SeuratObject
+                            assay = "RNA",                                #assay to use
+                            normalization.method = "LogNormalize",        #normalization method
+                            scale.factor = median(pbmc_small$nCount_RNA), #scale factor
+                            verbose = TRUE)
+  
+
+```
+
+Le slot `@data` sera mis a jour avec les UMI normalises.
+
+> Tips : il existe un raccourci pour acceder aux colonnes des metadata : `nomobjet@meta.data$column == nomobjet$column`
+
+### Identification des genes les plus variables
+
+On peut representer chaque cellule comme la combinatoire de l'expression de chaque gene. Il y a donc enormement de dimensions ce qui engendre beaucoup de bruit de fond.   
+
+Une premiere etape est de retirer les genes qui contiennent tres peu d'information, c'est a dire les genes qui sont peu/pas exprimes ou ceux qui sont exprimes de facon equivalente pour toutes les cellules. Ces genes la ne pourront pas aider a differentier les cellules entre elles. En les retirant, on permettra l'amelioration des methodes de reduction de dimension et de clustering pour une inference statistique fiable (ou en tout cas en enlevant du bruit de fond).
+
+Pour identifier les genes les plus variables on utilise la fonction de Seurat `FindVariableFeatures` avec la methode `vst` qui se base sur la relation entre la moyenne d'expression et la variance de chaque gene. Avec le parametre `nfeatures` on recupere les 2000 genes les plus variables selon la methode vst.
+
+```{r VariableFeature}
+
+pbmc_small <- FindVariableFeatures(pbmc_small,                 #SeuratObject
+                                   selection.method = "vst",   #method
+                                   nfeatures = 2000)           #top HVG (Highly Variable Gene), default value
+pbmc_small
+
+#plot
+VariableFeaturePlot(pbmc_small)
+```
+La fonction `FindVariableFeatures` mets a jour deux slots :  
+
+- `pbmc_small@assays$RNA@var.features` : vecteur des n genes determines comme etant les plus variables
+- `pbmc_small@assays$RNA@meta.features` : dataframe contenant les diffentes variables calculees lors de la methode vst. Pour chaque gene on a : 
+    - `vst.mean` : moyenne d'expression
+    - `vst.variance` : variance d'expression
+    - `vst.variance.expected` : variance attendue
+    - `vst.variance.standardized` : variance standardisee
+    - `vst.variable` : logique, est-ce que le gene est un gene variable TRUE / FALSE
+    
+> Tips : On peut acceder directement au vecteur des genes les plus variables grace a : `VariableFeatures(pbmc_small)` 
+
+## Reduction des dimensions
+
+Afin d'identifier les groupes de cellules, il faut reduire encore l'espace dimensionnel dans lequel les cellules evoluent. Il existe differentes methodes de reduction de dimension qui vont nous aider a atteindre notre objectif : visualiser et identifier les populations de cellules dans un espace dimensionnel faible et pertinent. Ici nous allons voir deux methodes, la premiere est l'analyse en composantes principales (appelee apres PCA) et la seconde qui se base sur la premiere : l'Approximation et Projection d'un Manifold Uniforme (UMAP).
+
+### Scaling des data
+
+La premiere etape est de realiser un scaling des data. Cette etape est obligatoire pour pouvoir inferer une PCA. La fonction Seurat `ScaleData` centre et reduit les donnees en ne prenant que les HVG par defaut. Il est possible aussi de lui fournir un vecteur de variables a regresser (le plus souvent on lui donne les noms de colonnes dans le slot `meta.data` associes).
+
+```{r ScalingData}
+
+pbmc_small <- ScaleData(pbmc_small)
+```
+
+Le slot `nomobjet@assays$RNA@scale.data` est maintenant renseigne. C'est un dataframe de dimensions `n HVG x n cellules` des donnees centrees reduites.  
+
+### Analyses en composantes Principales (ACP)
+
+2000 dimensions est toujours trop important pour trouver facilement les similarites et differences entre cellules. On va maintenant utiliser une methode de reduction de dimension appele PCA. Sommairement, la PCA va representer le nuage de point dans les 2000 dimensions puis chercher l'angle qui permettra d'eclater au maximum les cellules sur un plan. Les dimensions resultantes sont appelees composantes principales (PCs) et sont composees d'une combinatoire des precedentes dimensions (les expression de genes).  
+
+Pour cela, nous allons utiliser la fonction Seurat `RunPCA`. Pour des raisons de stockage, le parametre `npcs` permet de garder dans l'objet seurat que les premieres PCs, par defaut les 50 premieres. 
+
+```{r PCA}
+
+pbmc_small <- RunPCA(pbmc_small,                 #SeuratObject
+                     reduction.name = "pca",     #name of the reduction stored in the reduction slot
+                     npcs = 50,                  #Total Number of PCs to compute and store (50 by default)
+                     seed.use = 42,              #Set a random seed. By default, sets the seed to 42.
+                     verbose = TRUE)
+
+# Graphic representation of cells
+PCAPlot(pbmc_small,                              #SeuratObject
+        dims = c(1, 2))                          #dimensions (PCs) to plot, default is the first two
+
+```
+
+Le slot `nomobjet@reductions$pca` est maintenant cree, il est compose de plusieurs sous slots :
+
+- `@cell.embeddings` : dataframe des coordonnes des cellules sur les differentes PCs
+- `@feature.loadings` : dataframe des feature loadings (interpretes comme les coefficients de la combinaison lineaire des variables initiales (l'expression des genes) a partir desquelles les PCs sont construites)
+- `feature.loadings.projected` : dataframe des feature loadings projetes (vide)
+- `@assay.used` : nom de l'assay utilise (ici `"RNA"`)
+- `@global` : logique mais pas plus de description trouve sur ce slot
+- `@stdev` : vecteur des standard deviation des PCs stockees
+- `@key` : prefixe utilise pour nommer les PCs, lie au parametre `reduction.key` de `RunPCA`, defaut `PC_`
+- `@jackstraw` : slot prevu pour l'analyse Jack Straw (pour le moment vide)
+- `@misc` : decrit comme etant un slot pour des informations annexes supplementaires (vide)
+
+La fonction de plot represente donc nos cellules dans l'espace dimensionnel des deux premiers PCs de la PCA. Par defaut la colorisation des cellules se base sur l'`active.ident` donc la colonne `orig.ident` des metadata. 
+
+### Uniform Manifold Approximation and Projection (UMAP)
+
+Nous avons pu reduire les dimensions a 50 mais tout comme les genes, toutes les composantes principales ne contiennent pas forcement de l'information pertinente. Nous allons tout d'abord selectionner les PCs qui vont être utilisees pour le calcul de la UMAP.  
+
+#### Selection des PCs
+
+Pour cela nous pouvons nous baser sur deux methodes, Jack Straw et le Elbow Plot.
+
+##### La methode Jack Straw
+
+*WIP*
+
+```{r JackStraw}
+
+## JackStraw : Determine statistical significance of PCA scores
+pbmc_small <- JackStraw(pbmc_small,          #SeuratObject
+                        reduction = "pca",   #reduction to analyse
+                        dims = 50,           #number of dimension to analyse
+                        assay = "RNA")       #assay to use
+
+## Compute Jackstraw scores significance.
+pbmc_small <- ScoreJackStraw(pbmc_small,     #SeuratObject
+                             dims = 1:50)    #number of dimension to analyse
+  
+### Representation JackStrow
+JackStrawPlot(pbmc_small,                    #SeuratObject
+              dims = 1:50)                   #number of dimension to plot
+  
+```
+
+On cherche un *"saut"* dans les pvaleurs des PCs. On essaye le plus souvent de recuperer les PCs dont la pvaleur est significative. Ici on peut s'arreter a la PC 10 ou 11, car la 12 a une pvaleur 2e-3 puis le reste des PCs ne fait que d'osciller avec des pvaleurs egales a 1. Si on veut etre plus stringeant on peut egalement selectionner que les 8 premieres PCs car ensuite la valeur augmente puis diminue. Le fait d'etre plus stringeant permet de reduire du bruit de fond, en revanche on elimine la possibilite d'observer des similarites plus subtiles entre nos cellules.
+
+##### La methode de l'Elbow plot
+
+Cette methode consiste a reperer un *"coude"* dans la distribution des standard deviations des differentes PCs. 
+
+> Je trouve cette methode beaucoup plus complique pour statuer le nombre de PCs a garder. Mais elle permet d'avoir un second avis, a choisir je me base plus preferentiellement sur le resultat du Jack Straw
+
+```{r ElbowPlot}
+ElbowPlot(pbmc_small,           #SeuratObject
+          ndims = 20,           #number of dimension to analyse
+          reduction = "pca")    #reduction to analyse
+```
+
+Apres visualisation du Elbow plot avec 50 PCs, nous avons reduit a 20PCs car c'etait trop complique pour observer un coude. Ici on pourrait voir un petit saut dans la distribution entre les PCs 10 et 15 ce qui corroborerait avec les resultats du Jack Straw.
+
+--> On peut determiner le choix du nombre de PCs à **10**. 
+
+#### Inference de la UMAP
+
+Meme si la PCA permet de reduire les dimensions et de nous permettre d'entrapercevoir des groupes de cellules, la methode de la UMAP permet d'ameliorer ce signal. En effet a partir de la matrice de coordonnees de la PCA, il va construire un graphe qui permet de representer nos cellules dans un espace dimensionnel encore plus restreint tout en gardant au maximum la structure global de notre nuage de point initial.  
+
+On utilise d'ailleurs beaucoup plus la UMAP que la t-SNE desormais car cette derniere represente les distances de maniere plus complexes. La structure du nuage de point dans les dimensions d'une t-SNE fait que les distances ne peuvent pas etre reellement considerees comme correles lineairement avec la similarite entre cellules. Grosso modo, les distances de proche en proche entre cellules permet d'affirmer que ces cellules se ressemblent, en revanche les distances entre groupes de cellules ne peuvent pas etre interepreter comme autant different les uns des autres. 
+
+```{r UMAP}
+
+pbmc_small <- RunUMAP(pbmc_small,               #SeuratObject
+                      reduction = "pca",        #reduction used to compute UMAP
+                      reduction.key = "UMAP_",  #dimension prefix
+                      assay = "RNA",            #assay to use
+                      dims = 1:10)              #number of PCs to keep (previously determined)
+
+#plot
+UMAPPlot(pbmc_small)
+```
+
+*WIP*
+
+La fonction de plot represente donc nos cellules dans l'espace dimensionnel des deux premieres dimensions de la UMAP. Par defaut la colorisation des cellules se base sur l'`active.ident` donc la colonne `orig.ident` des metadata. 
+
+## Generation des groupes de cellules
+
+Maintenant que nous pouvons observer des groupes de cellules, il nous faut desormais etre capables de les identifier. Pour cela on va utiliser des methodes computationnelles de regroupement de cellules, appeles clustering.
+
+Dans Seurat, on utilisera deux fonctions. `FindNeighbors` permet de construire un graphe des plus proches voisins partages (Shared Nearest Neighbors, SNN). Les noeuds representent les cellules et les liens leur proximite dans l'espace dimensionnel de la PCA. Par defaut, cette fonction ne represente que les 20 plus proches voisins. Les liens sont ensuite retires s'il n'y a pas la reciprocite de la proximite.  
+
+`FindClusters` va à partir de ce graph SNN determiner les clusters en identifiant les groupes de cellules les plus interconnectes basé sur l'optimisation de la modularité. Cette methode depend de la resolution que l'on choisit. Plus la resolution est faible, moins il y aura de cluster. Il n'y a pas une seule valeur de resolution valable c'est pour cela que l'on va calculer les clusters en fonction de plusieurs resolutions et de determiner a posteriori quelle est la resolution qui represente le mieux nos populations de cellules.
+
+
+```{r Clustering}
+pbmc_small <- FindNeighbors(pbmc_small,          #SeuratObject
+                            reduction = "pca",   #reduction to used
+                            k.param = 20,
+                            dims = 1:10, 
+                            do.plot = TRUE)
+
+pbmc_small <- FindClusters(pbmc_small,                                        #SeuratObject
+                           resolution = seq(from = 0.2, to = 1.2, by = 0.2),  #Compute clustering with several resolutions (from 0.2 to 1.2 : values usually used)
+                           verbose = FALSE)
+
+```
+
+`FindNeighbors` construit deux graphes disponibles dans le slot `nomobjet@graphs` où l'on peut retrouver toutes les informations sur les graphes NN (nearest neighbors) et SNN (shared nearest neighbors).  
+
+`FindClusters` ajoute des colonnes dans les metadata avec le prefixe `RNA_snn_res.` suivi par les differentes resolutions computes ainsi que la colonne `seurat_clusters` correspondant aux clusters determines lors de la derniere resolution calculee. Chaque colonne va donc associe un numero de cluster pour chaque cellule.  
+
+#### Quelle resolution choisir ?
+
+*WIP*
+
+Nous avons plusieurs sets de clusters calcule sur la base de differentes resolution. Il faut maintenant choisir quelle resolution represente le mieux nos populations de cellules. Un outil permet de nous aiguiller dans ce choix, le package `Clustree` represente les relations et la distribution des cellules au sein des clusters des differentes resolutions. 
+
+```{r Clustree}
+clustree(pbmc_small,
+         prefix = "RNA_snn_res.")    
+```
+
+Chaque point correspond a un cluster dont la taille represente le nombre de cellule qui le compose et la couleur, la resolution du clustering. La premiere resolution (en haut) sera toujours la resolution la plus faible, puis on retrace le chemin de chaque cellule au travers des clusters des differentes resolutions (de plus en plus grande) grace aux fleches. On analyse ici 6 resolutions de 0.2 en rouge jusqu'a 1.2 en rose.  
+
+Les fleches represente la distribution des clusters d'une resolution plus faible vers les clusters d'une resolution plus élevé. Par exemple, les cellules du cluster 0 de la resolution 0.2 en rouge se repartissent dans les clusters 0 et 1 de la resolution 0.4 en vert kaki. Tandis que le cluster 2 de la résolution 0.2 est compose des memes cellules que le cluster 2 de la resolution 0.4. Les numeros de clusters sont attribues selon leur taille (ainsi le cluster 0 sera toujours celui qui sera compose du plus de cellule, et ainsi de suite). La couleur des fleches correspond au nombre de cellules du cluster *"parent"* qui alimente le cluster *"enfant"*. L'opacite des fleches represente la proportion de cellules provenant du cluster *"parent"*. C'est sur ce point que clustree nous permet d'identifier la resolution a choisir. Un cluster ne devrait avoir qu'un seul parent.
+
+On peut observer les faits suivants : 
+
+- Les clustering obtenus à partir des resolutions 0.4, 0.6 et 0.8 sont identique.
+- Tous les clusters ont une seule origine, sauf le cluster 10 de la resolution 1.0.
+- Le cluster 10 de la resolution 1.0 est composé majoritairement du cluster 0 de la resolution 0.8 et environ 20% du cluster 4 de la resolution 0.8
+- Ce meme cluster 10 ne donne pas de *"descendance"* a la resolution 1.2
+
+Dans quels clusters de la resolution 1.2 se retrouve les cellules du cluster 10 de la resolution 1.0 ?
+
+```{r, results='markup'}
+table(subset(pbmc_small@meta.data, RNA_snn_res.1 == 10)$RNA_snn_res.1.2)
+```
+
+Les cellules du cluster 10 se retrouve donc majoritairement dans le cluster 2 puis dans le cluster 5 de la resolution 1.2.
+
+
+```{r SetIdents}
+##Set the default resolution level
+Idents(pbmc_small) <- "RNA_snn_res.0.8"
+
+##visualize clusters in UMAP coordinates
+UMAPPlot(pbmc_small,
+         label = TRUE,
+         label.size = 4)
+```
+
+
+## Identification et analyses des marqueurs
+
+### Identification des marqueurs
+
+```{r FindMarkers}
+
+pbmc_markers <- FindAllMarkers(pbmc_small,              #SeuratObject
+                               only.pos = FALSE,        #Returns positive and negative gene markers
+                               min.pct = 0.1,           #Take into account genes that are detected in at least 10% of the cells
+                               logfc.threshold = 0.25,
+                               test.use = "wilcox",     #Method used
+                               verbose = TRUE)   
+
+#Preview of the resulting dataframe
+knitr::kable(head(pbmc_markers), "simple")
+```
+
+### Annotation des marqueurs
+#### Via Biomart
+#### Via ClusterProfiler
+
+## Visualisations
