@@ -42,6 +42,7 @@ library(enrichplot)
 library(knitr)
 library(rmarkdown)
 library(msigdbr)
+library(vroom)
 ```
 
 # Analyse single cell via Seurat
@@ -1384,17 +1385,28 @@ La visualisation du `FeaturePlot` avec `blend = TRUE` nous montre 4 panels. Le p
 
 ## References
 
-\doi{10.1016/j.cell.2019.05.031}
-\doi{10.1093/bioinformatics/btu674}
-\doi{10.1073/pnas.0506580102}
-\doi{10.1038/ng1180}
-\doi{10.1093/bioinformatics/btr260}
-\doi{10.1093/nar/gkaa1113}
-\doi{10.1038/75556}
-\doi{10.1093/nar/28.1.27}
-\doi{10.1002/pro.3715}
-\doi{10.1093/nar/gkaa970}
-\doi{10.1093/nar/gky900}
+Stuart T, Butler A, Hoffman P, Hafemeister C, Papalexi E, Mauck WM 3rd, Hao Y, Stoeckius M, Smibert P, Satija R. Comprehensive Integration of Single-Cell Data. Cell. 2019 Jun 13;177(7):1888-1902.e21. doi: 10.1016/j.cell.2019.05.031. Epub 2019 Jun 6. PMID: 31178118; PMCID: PMC6687398.
+
+Neo Christopher Chung, John D. Storey, Statistical significance of variables driving systematic variation in high-dimensional data, Bioinformatics, Volume 31, Issue 4, 15 February 2015, Pages 545–554, https://doi.org/10.1093/bioinformatics/btu674
+
+Aravind Subramanian, Pablo Tamayo, Vamsi K. Mootha, +7, Sayan Mukherjee, Benjamin L. Ebert, Michael A. Gillette, Amanda Paulovich, Scott L. Pomeroy, Todd R. Golub, Eric S. Lander, and Jill P. Mesirov. Gene set enrichment analysis: A knowledge-based approach for interpreting genome-wide expression profiles. PNAS, Volume 102, Number 43, Pages 15545-15550, (2005) https://doi.org/10.1073/pnas.0506580102
+
+Mootha, V., Lindgren, C., Eriksson, KF. et al. PGC-1α-responsive genes involved in oxidative phosphorylation are coordinately downregulated in human diabetes. Nat Genet 34, 267–273 (2003). https://doi.org/10.1038/ng1180
+
+Arthur Liberzon, Aravind Subramanian, Reid Pinchback, Helga Thorvaldsdóttir, Pablo Tamayo, Jill P. Mesirov, Molecular signatures database (MSigDB) 3.0, Bioinformatics, Volume 27, Issue 12, 15 June 2011, Pages 1739–1740, https://doi.org/10.1093/bioinformatics/btr260
+
+The Gene Ontology Consortium, The Gene Ontology resource: enriching a GOld mine, Nucleic Acids Research, Volume 49, Issue D1, 8 January 2021, Pages D325–D334, https://doi.org/10.1093/nar/gkaa1113
+
+Ashburner, M., Ball, C., Blake, J. et al. Gene Ontology: tool for the unification of biology. Nat Genet 25, 25–29 (2000). https://doi.org/10.1038/75556
+
+Minoru Kanehisa, Susumu Goto, KEGG: Kyoto Encyclopedia of Genes and Genomes, Nucleic Acids Research, Volume 28, Issue 1, 1 January 2000, Pages 27–30, https://doi.org/10.1093/nar/28.1.27
+
+Kanehisa, M. Toward understanding the origin and evolution of cellular organisms. Protein Science. 2019; 28: 1947– 1951. https://doi.org/10.1002/pro.3715
+
+Minoru Kanehisa, Miho Furumichi, Yoko Sato, Mari Ishiguro-Watanabe, Mao Tanabe, KEGG: integrating viruses and cellular organisms, Nucleic Acids Research, Volume 49, Issue D1, 8 January 2021, Pages D545–D551, https://doi.org/10.1093/nar/gkaa970
+
+Xinxin Zhang, Yujia Lan, Jinyuan Xu, Fei Quan, Erjie Zhao, Chunyu Deng, Tao Luo, Liwen Xu, Gaoming Liao, Min Yan, Yanyan Ping, Feng Li, Aiai Shi, Jing Bai, Tingting Zhao, Xia Li, Yun Xiao, CellMarker: a manually curated resource of cell markers in human and mouse, Nucleic Acids Research, Volume 47, Issue D1, 08 January 2019, Pages D721–D728, https://doi.org/10.1093/nar/gky900
+
 
 ```{r SessionInfo, results='markup'}
 sessionInfo()
