@@ -7,12 +7,6 @@ output:
     toc: yes
     toc_depth: 3
     code_folding: show
-  pdf_document: 
-    highlight: tango
-    theme: cerulean
-    toc: yes
-    toc_depth: 3
-    code_folding: show #knit pdf not working must install latex
 ---
 
 ```{r setup, include=FALSE}
@@ -38,23 +32,68 @@ library(ggplot2)
 library(gridExtra)
 library(RColorBrewer)
 library(biomaRt)
-require(plyr)
-require(dplyr)
-require(magrittr)
+library(plyr)
+library(dplyr)
+library(magrittr)
 library(clustree)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(enrichplot)
+library(knitr)
+library(rmarkdown)
+library(msigdbr)
 ```
-
 
 # Analyse single cell via Seurat
 
 Une analyse single-cell RNA seq classique consiste a identifier des populations de cellules ainsi que les genes marqueurs associes. Elle peut egalement rechercher l'effet d'un traitement ou d'une condition grace aux methodes d'analyse differentielle.  
+
+Le dataset utilise pour l'analyse est compose de cellules mononucleaires du sang peripherique (PBMC). Il est disponible sur le site 10X et de Seurat que l'on peut retrouver sur le [tutoriel de Seurat](https://satijalab.org/seurat/articles/pbmc3k_tutorial.html).  
+
+
+## Fonctions
+
+Dans un script R les bonnes pratiques de programmation incitent qu'en chaque debut de script nous mettions les fonctions que nous developpons apres l'appel des librairies. Dans le prochain *chunk* de code, on retrouvera les fonctions qui nous seront utiles lors de l'analyse.
+
+Ici c'est une fonction qui permettra d'annoter les plots afin d'avoir le nom du gene en plus de son identifiant.
+
+```{r Rfunctions}
+
+add_title_gene_name <- function(plot, 
+                                   gene_format,
+                                   from = "ensembl_gene_id", 
+                                   to = "external_gene_name"){
+  ## Add gene name as title and leave gene ID as subtitle of a plot
+  ### Inputs
+  ## - plot (data) : ggplot to modify
+  ## - gene_format (data) : dataframe that contains at least the type of gene id present in the plot (from) and the gene label type to use instead (to) 
+  ## - from (chr) : label gene type present in the plot (must be the column name of the annotated dataframe)
+  ## - to (chr) : label gene type to use
+  ### Output
+  ## - Plot with a new title + subtitle
+  
+  ##check if a modification is possible
+  ## check if one of the column data is a gene of the "from" column of gene_format
+  test_matching <- colnames(plot$data) %in% gene_format[, from]
+  if(sum(test_matching)){
+    gene_to_rename <- colnames(plot$data)[test_matching]
+    plot <- plot + 
+      ggtitle(gene_format[gene_format[, from] == gene_to_rename, to],
+              gene_to_rename)
+  }else{
+    stop(paste("No matching between plot metadata and", from, "column of `gene_format` dataframe.\n", "Please check your parameters."))
+  }
+  return(plot)
+}
+
+```
 
 
 ## Import des fichiers
 
 ### Matrice d'expression
 
-Il faut importer en premier les donnees. Elles sont generalement sous la forme de 3 fichiers :  
+Il faut importer en premier les donnees d'expression. Elles sont generalement sous la forme de 3 fichiers :  
 
 - le nom des transcriptomes `barcodes.tsv` : fichier a une colonne avec le nom des transcriptomes (cellules, barcodes)
 - le nom des genes en format `genes.tsv` : fichier de trois colonnes (geneID de l'annotation gtf utilise, gene name, "Gene Expression")
@@ -62,81 +101,119 @@ Il faut importer en premier les donnees. Elles sont generalement sous la forme d
 
 La fonction `Read10X` de Seurat permet de creer a partir de ces fichiers la matrice d'expression en format `dgCMatrix`. C'est une sparse matrix utilisee pour un traitement efficace des grandes matrices.
 
+Un parametre tres important de `Read10X` est `gene.column` qui nous permet de choisir quelle colonne du fichier `genes.tsv` utiliser. Il est preferable de selectionner la colonne composee uniquement de gene ID lors de l'analyse (colonne 1) et de n'utiliser les *gene names* que lors de l'etape de l'annotation des genes marqueurs. En effet la colonne 2 de `genes.tsv` est en fait composee de *gene name* et de *gene ID* (car il n'y a pas forcement de *gene name* attribue a chaque identifiant unique). De plus, plusieurs *gene ID* peuvent correspondre a un seul *gene name* complexifiant enormement l'etape d'annotation.  
+Si on choisit la colonne 2, les duplicats dans les *genes names* sont gerees avec la fonction `make.unique` qui detecte les duplicats puis rajoute des `.1, .2, ..., .n` apres chaque occurence (sachant que la premiere occurence n'est pas modifiee). Avec ces noms de genes modifies, il sera tres difficile d'utiliser les differentes bases de donnees qui ne pourront pas reconnaitre textuellement ces nouveaux noms de genes.  
+On pourrait penser qu'il serait facile de retrouver les genes dont les noms ont ete modifies apres coup en recherchant tous les genes qui auraient un point dans leur noms, malheureusement certains noms de gene contiennent deja des points complexifiant encore une fois la recherche de motifs. 
+Pour s'affranchir de toutes ces problematiques, je **recommande vivement** d'utiliser la premiere colonne et d'utiliser qu'apres des  *gene names*.
+
 ```{r Import}
 
-### Import expression matrix
-system("wget https://cf.10xgenomics.com/samples/cell/pbmc3k/pbmc3k_filtered_gene_bc_matrices.tar.gz")
-system("tar -zxvf pbmc3k_filtered_gene_bc_matrices.tar.gz")
-tenX_matrix <- Read10X(data.dir = "./filtered_gene_bc_matrices/hg19", #path to the directory containing the three 10X files (matrix.mtx, genes.tsv (or features.tsv depending on the CellRanger version), barcodes.tsv)
-                       gene.column = 1) #choice of the genes.tsv column that will determine the names of the genes in the expression matrix
+## Import expression matrix
+system("wget -P ./test-data/ https://cf.10xgenomics.com/samples/cell/pbmc3k/pbmc3k_filtered_gene_bc_matrices.tar.gz")
+system("tar -zxvf ./test-data/pbmc3k_filtered_gene_bc_matrices.tar.gz -C ./test-data/")
+tenX_matrix <- Read10X(data.dir = "./test-data/filtered_gene_bc_matrices/hg19", #Path to the directory containing the three 10X files (matrix.mtx, genes.tsv (or features.tsv depending on the CellRanger version), barcodes.tsv)
+                       gene.column = 1) #Choice of the genes.tsv column that will determine the names of the genes in the expression matrix
 
-##matrix dimension : first value is the number of row (genes) and second value is the number of column (sample/barcodes)
+## Matrix dimension : first value is the number of row (genes) and second value is the number of column (sample/barcodes)
 dim(tenX_matrix)
 ```
 
+Description de l'objet `dgCmatrix` : 
 
-Il est preferable d'utiliser la colonne composee uniquement de gene ID lors de l'analyse (colonne 1) et de n'utiliser les gene names que lors de l'etape de l'annotation des genes marqueurs. En effet la colonne 2 de `genes.tsv` est en fait composee de gene name et de gene ID. Sachant surtout que plusieurs gene ID peuvent correspondre a un seul gene name, cela complexifie enormement l'etape d'annotation.  
-Si on choisit la colonne 2, les duplicats dans les genes names sont gerees avec la fonction `make.unique` qui detecte les duplicats puis rajoute des `.1, .2, ..., .n` apres chaque occurence. La premiere occurence n'est pas modifiee.  
+- `i` : position de la ligne de chaque valeur non nulle de votre matrice d'expression (sachant que l'indice de la ligne commence à zéro)
+- `p` : vecteur de taille `nombre de barcode + 1` et est decrit comme representant le nombre de valeur non nulle dans chaque colonne (`j`) tel que : `tenX_matrix@p[j+2] - tenX_matrix@p[j+1]`
+- `Dim` : vecteur contenant les dimensions de votre matrice d'expression (nombre de genes, lignes puis le nombre de barcodes, colonnes)
+- `Dimnames` : liste contenant les noms des genes (rownames) et les noms des barcodes (colnames)
+- `x` : vecteur qui contient les valeurs d'expression non nulle
+- `factors`
 
-Ici on utilise les datasets tests de Seurat que l'on peut retrouver sur le [tutoriel de Seurat](https://satijalab.org/seurat/articles/pbmc3k_tutorial.html).  
+Ce qu'il faut retenir de cet objet complexe ce sont surtout les slots correspondant au nombre de dimensions et leurs noms (pour savoir l'annotation de vos genes et de vos barcodes) ainsi que `x` qui permet de visualiser les differentes valeurs d'expression. Pratique pour savoir si ce que vous avez entre les mains sont des valeurs entieres, donc probablement des niveaux d'expression bruts, ou bien si vous avez des valeurs decimales qui refleteraient des niveaux d'expression normalises. Une `dgCMatrix` est visualisee dans la console exactement comme un dataframe ou les points correspondent a zero : 
+
+```{r visudgCMatrix, results = 'markup'}
+## Visualize first three rows and columns
+tenX_matrix[1:3, 1:3]
+
+```
 
 Si le format de la matrice d'expression n'est pas en format trois fichiers mais un fichier contenant une table (*n* genes x *n* barcodes), on peut passer directement a l'etape suivante.  
 
 ### Annotation biomaRt
 
-On va ensuite importer la base de donnees biomart qui nous servira ensuite a annoter les genes de notre analyse. Cela permettra notamment de passer d'un Ensembl gene ID a un gene name. Les donnees de Seurat etant en hg19 on recupere la base de donnees pour cette annotation la.  
+On va ensuite importer la base de donnees biomart qui nous servira ensuite a annoter les genes de notre analyse. Cela permettra notamment de passer d'un Ensembl gene ID a un *gene name*. Les donnees de Seurat etant en hg19 on recupere la base de donnees pour cette annotation la.  
+
+Le package biomaRt permet de recuperer les bases de donnees qui sont disponibles via [Ensembl BioMart](https://www.ensembl.org/biomart/martview/aeb467155c9aeccaa44a70171cde4e15) et pouvoir interagir directement dans l'environnement R. 
+La premiere fonction que l'on va utiliser est `useEnsembl` pour se connecter a Ensembl. Vous pouvez voir toutes les versions et genomes disponibles grace a la fonction du meme package `listEnsembl`. Le resultat de `useEnsembl` est un objet S4 de classe Mart qui contient la base de donnee du genome et de la version souhaitee. 
+Une seconde etape nous permettra d'obtenir un dataframe avec l'annotation des genes. La fonction `getBM` va effectuer une requete via l'objet Mart que nous avons precedemment genere. Il lui faut lui fournir un vecteur contenant differents attributs (chromosome, nom du gene, homologues, orthologues, et beaucoup d'autres...). On peut avoir la liste exhaustive avec la fonction `listAttributes`. 
+
+Ici nous allons aussi filtrer pour ne recuperer l'annotation que pour notre liste de genes avec les parametres *filters* et *values*.  
 
 ```{r Biomart, echo=TRUE}
-# Import of the biomart database for hg19
-ensembl_hg19 <- useEnsembl(biomart = "genes",                  #import ensembl genes database
-                           dataset = "hsapiens_gene_ensembl",  #genome
-                           GRCh = 37)                          #genome version, only 38 or 37 are accepted for now
+## Import of the biomart database for hg19
+ensembl_hg19 <- useEnsembl(biomart = "genes",                  #Import ensembl genes database
+                           dataset = "hsapiens_gene_ensembl",  #Genome
+                           GRCh = 37)                          #Genome version, only 38 or 37 are accepted for now
 
-# Recovering attributes according to our gene list (genes present in our expression matrix)
+## If you don't know what to give to biomart parameter of useEnsembl just run :
+#listEnsembl() #dataframe where the first column is the value to give to biomart parameter of useEnsembl
+
+## If you don't know the available datasets :
+#listDatasets(mart = useEnsembl(biomart = "genes")) #dataframe where the first column (dataset) contains the value to give to dataset parameter of useEnsembl, add GRCh parameter in the useEnsembl function to precise your preferred genome version
+
+## Recovering attributes according to our gene list (genes present in our expression matrix)
 annotated_hg19 <- getBM(attributes = c("ensembl_gene_id",
                                        "external_gene_name", 
                                        "description",
                                        "gene_biotype", 
-                                       "chromosome_name"),    #informations to retrieve
-                           filters = "ensembl_gene_id",       #which variable to choose for the filtering
-                           values = rownames(tenX_matrix),    #values that will filter the database
-                           mart = ensembl_hg19)               #database
+                                       "chromosome_name"),    #Informations to retrieve
+                           filters = "ensembl_gene_id",       #Which variable to choose for the filtering
+                           values = rownames(tenX_matrix),    #Values that will filter the database
+                           mart = ensembl_hg19)               #Database
 
-#preview of the resulting dataframe
+## If you need to know all available attributes and their name
+#listAttributes(mart = ensembl_hg19) #dataframe where the first column is the attribute' names needed for the attributes parameter of getBM
+
+## Preview of the resulting dataframe
 knitr::kable(head(annotated_hg19), "simple")
 
 ```
+
 Nous avons obtenu un dataframe avec les informations relatives aux genes presents dans notre matrice d'expression.  
 
 ## Creation de l'objet Seurat
 
-Ensuite grace a la fonction `CreateSeuratObject` on va pouvoir importer cette matrice dans un objet Seurat qui va être la base de notre analyse. Toutes les differentes etapes vont être associees a cet objet qui est un objet S4 (arborescence d'autres objets plus petits, dataframe, vecteurs...), specifique a Seurat appele un `SeuratObject`.  
+Ensuite grace a la fonction `CreateSeuratObject` on va pouvoir importer la matrice d'expression dans un objet Seurat qui va être la base de notre analyse. Toutes les differentes etapes vont être associees a cet objet qui est un objet S4 (arborescence d'autres objets plus petits, dataframe, vecteurs...), specifique a Seurat appele un `SeuratObject`.  
+
+Il y a trois parametres importants : 
+
+- `project` : le nom de votre projet qui sera aussi l'identite premiere de vos cellules. Il est donc tres important de definir un nom de projet et de ne pas laisser la valeur par defaut. 
+- `min.cells` : permet de filtrer les genes qui ne sont pas detectes dans au moins `min.cells`
+- `min.features` : permet de filtrer les cellules qui ne detectent pas au moins `min.features`. On va definir `min.features = 1` pour filtrer les barcodes (cellules) qui ne contiennent aucun UMI. Cela permet egalement d'alleger le poids de l'objet Seurat dans notre environnement.
 
 ```{r CreateSeuratObject, results='markup'}
-### Creation of the Seurat Object
-pbmc_small <- CreateSeuratObject(tenX_matrix,                    #expression matrix
-                                 project = "Seurat data test",   #name of the project
-                                 assay = "RNA",                  #name of the initial assay, (others can be created during the analysis), default is RNA
-                                 names.field = 1,                #associated with the names.delim, it allows to separate the name of the barcode when this one is composed of several information ex: BARCODE_CLUSTER_CELLTYPE and to choose after split on the names.delim which part we choose as the barcode name
-                                 names.delim = "_",              #character that allows to dissociate the different information contained in the barcode names
-                                 meta.data = NULL,               #we can add the metadata on the transcriptomes with a dataframe where the barcodes are in line and the different information in column
-                                 min.cells = 0,                  #filtering genes that are not detected in less than min.cells
-                                 min.features = 1)               #filtering cells that do not detect at least min.features, here we filter all barcodes that detect no gene
+## Creation of the Seurat Object
+pbmc_small <- CreateSeuratObject(tenX_matrix,                    #Expression matrix
+                                 project = "PBMC analysis",      #Name of the project : something meaningful for your dataset
+                                 assay = "RNA",                  #Name of the initial assay, (others can be created during the analysis), default is RNA
+                                 names.field = 1,                #Associated with the names.delim, it allows to separate the name of the barcode when this one is composed of several information ex: BARCODE_CLUSTER_CELLTYPE and to choose after split on the names.delim which part we choose as the barcode name
+                                 names.delim = "_",              #Character that allows to dissociate the different information contained in the barcode names
+                                 meta.data = NULL,               #We can add the metadata on the transcriptomes with a dataframe where the barcodes are in line and the different information in column
+                                 min.cells = 0,                  #Filtering genes that are not detected in less than min.cells
+                                 min.features = 1)               #Filtering cells that do not detect at least min.features, here we filter all barcodes that detect no gene
 
-pbmc_small # Small presentation of the Seurat object in R console
+pbmc_small #Small presentation of the Seurat object in R console
 
-# Discovery of SeuratObject
+## Discovery of SeuratObject
 str(pbmc_small)
 dim(pbmc_small@assays$RNA@counts)
 dim(pbmc_small@assays$RNA@data)
 
-knitr::kable(head(pbmc_small@meta.data), "simple") # preview of the cell metadata
+knitr::kable(head(pbmc_small@meta.data), "simple") #Preview of the cell metadata
 ```
 
 
-Ici on peut donc voir apparaitre plusieurs slots differents :  
+Ici on peut donc voir apparaitre plusieurs slots :  
 
-- assays : slot general qui comprendra les differentes informations de chaque etude. Elles sont composees de plusieurs choses : 
+- `assays` : slot general qui comprendra les differentes informations de chaque etude. Elles sont composees de plusieurs choses : 
     - la matrice d'expression de depart (`@counts`), habituellement des raw counts ou raw UMI
     - celle qui va "subir" toutes les modifications (filtres, normalisation, etc) (`@data`) 
     - dataframe qui sera cree lors du scaling des data (`@scale_data`)
@@ -144,10 +221,10 @@ Ici on peut donc voir apparaitre plusieurs slots differents :
     - vecteur des noms de genes qui seront determines comme ayant une expression variable (`@var.features`)
     - dataframe associe aux genes avec les differentes metadata (`@meta.features`)
     
-- meta.data : regroupe toutes les informations concernant les cellules. Au depart Seurat va calculer la taille de la librarie (nCount_RNA, ou le nombre d'UMI) et le nombre de genes detectes (nFeatures_RNA) pour chaque cellule. Si on lui renseigne un dataframe dans le parametre `meta.data` de la fonction `CreateSeuratObject`, ses colonnes seront ajoutees apres celles calculees par Seurat.  
+- `meta.data` : regroupe toutes les informations concernant les cellules. Au depart Seurat va calculer la taille de la librarie (nCount_RNA, ou le nombre total d'UMI) et le nombre de genes detectes (nFeatures_RNA) pour chaque cellule. Si on lui renseigne un dataframe dans le parametre `meta.data` de la fonction `CreateSeuratObject`, ses colonnes seront ajoutees apres celles calculees par Seurat.  
 
-- active.assay : etude utilise par defaut
-- active.ident : identite des cellules par defaut, ici le nom du projet donne, stocke aussi sous la colonne `orig.ident` dans les metadata
+- `active.assay` : etude utilise par defaut
+- `active.ident` : identite des cellules par defaut, ici le nom du projet donne, stocke aussi sous la colonne `orig.ident` dans les metadata
 
 La navigation dans les differents slots se fait via `@` ou `$`. Chaque slot principal est accessible via le `@`, c'est a dire `nomobjet@slotprincipal` pour aller plus loin dans l'arborescence des slots, le plus souvent les objets complexes sont accessibles avec un `@` (dgCMatrix, dataframe) et les listes, vecteurs sont accessibles via `$`. Au moindre doute, on peut se referer au resultat de la commande `str`. 
 
@@ -157,35 +234,34 @@ Les etapes du preprocessing servent a nettoyer les donnees afin de ne pas fausse
 
 ### Filtrage des cellules de faible qualite
 
-La premiere etape est de filtrer les cellules qui sont de pauvre qualite. Cela peut concerner les cellules qui ont explose lors la prepation de la librarie, les *beads* vides ou qui contiennent de l'ARN ambiant, etc... On va pouvoir se baser sur differents parametres comme le nombre de genes detectes, le nombre d'UMI, le pourcentage de genes de la mitochondrie exprimes... 
+La premiere etape est de filtrer les cellules qui sont de pauvre qualite. Cela peut concerner les cellules qui ont explose lors la prepation de la librarie, les *beads* vides ou qui contiennent de l'ARN ambiant, *etc*... On va pouvoir se baser sur differents parametres comme le nombre de genes detectes, le nombre d'UMI, le pourcentage de genes de la mitochondrie exprimes. Certains barcodes peuvent etre consideres comme des doublets, c'est a dire que deux cellules ont ete encapsulees dans la meme *bead*. Ce phenomene va etre traduit à l'inverse par un nombre tres important de genes detectes et une taille de librarie largement superieure au reste du dataset.
 
 #### Calcul du pourcentage de genes mitochondriaux
 
 Un haut taux d'expression des genes du genome MT peut exprimer une cellule en apoptose.  
 
-Grâce a la fonction `PercentageFeatureSet`, on calcule pour chaque cellule du % d'expression des genes mitochondriaux parmi tous les genes exprimes. Si on utilise les gene names, on peut directement utilise le parametre `pattern` en renseignant "*^MT-*" pour capturer tous les genes commencant par "*MT-*". S'il n'y a pas de pattern dans les noms de genes, grâce au parametre `features` on lui renseigne directement un vecteur contenant les genes presents sur le genome MT. On peut s'aider de l'annotation Biomart en recuperant tous les genes present sur le chromosome MT si les ID (ou les gene names) n'ont pas de prefixe pour les differencier. La fonction `PercentageFeatureSet` ajoute une colonne avec les valeurs de % dans les metadata des cellules (`nomobjet@meta.data`).
+Grâce a la fonction `PercentageFeatureSet`, on calcule pour chaque cellule le % d'expression des genes mitochondriaux parmi tous les genes exprimes. Si on utilise les *gene names*, on peut directement utiliser le parametre `pattern` en renseignant "*^MT-*" pour capturer tous les genes commencant par "*MT-*". S'il n'y a pas de motif dans les noms de genes, grâce au parametre `features` on lui renseigne directement un vecteur contenant les genes presents sur le genome MT. On peut s'aider de l'annotation Biomart en recuperant tous les genes present sur le chromosome MT si les ID (ou les *gene names*) n'ont pas de prefixe pour les differencier. La fonction `PercentageFeatureSet` ajoute une colonne avec les valeurs de % dans les metadata des cellules (`nomobjet@meta.data`).
 
 On considere generalement une cellule en apoptose lorsque le transcriptome detecte plus de 20% les genes du genome MT. Certains sont plus stringeant en abaissant ce seuil a 10%.  
 
 
 ```{r MitoGenes}
-##Retrieve genes from the MT genome using biomart
+## Retrieve genes from the MT genome using biomart
 genes_MT <- annotated_hg19$ensembl_gene_id[annotated_hg19$chromosome_name == "MT"]
 
 
 pbmc_small <- PercentageFeatureSet(pbmc_small,
-                                   features = genes_MT,        # vectors of gene names present on the MT genome
-                                   col.name = "percent_mito",  # Defines the name of the new column generated in the metadata of the Seurat object
+                                   features = genes_MT,        #Vectors of gene names present on the MT genome
+                                   col.name = "percent_mito",  #Defines the name of the new column generated in the metadata of the Seurat object
                                    assay = "RNA")
 
-###Violin plot of QC (Quality Controls)
+## Violin plot of QC (Quality Controls)
 VlnPlot(object = pbmc_small,
-        features = c("nCount_RNA", "nFeature_RNA", "percent_mito"), # Parameters to plot (either gene expression or continuous variable in cell metadata)
-        ncol = 3,                                                   # Number of columns if several figures are to be ploted
-        pt.size = 0.01)                                             # Point size
+        features = c("nCount_RNA", "nFeature_RNA", "percent_mito"), #Parameters to plot (either gene expression or continuous variable in cell metadata)
+        ncol = 3,                                                   #Number of columns if several figures are to be ploted
+        pt.size = 0.01)                                             #Point size
 
-###Graphical representation of QC
-
+## Graphical representation of QC
 ggplot(pbmc_small@meta.data,
        aes(y = nCount_RNA,
            x = nFeature_RNA,
@@ -196,7 +272,8 @@ ggplot(pbmc_small@meta.data,
   scale_y_log10() +
   scale_color_gradient2(low = "green", 
                         high = "red", 
-                        mid = "yellow") +
+                        mid = "yellow", 
+                        midpoint = 20) +
   ggtitle("QC plot", "Number of detected genes in function of number of UMI")+
   labs(y = "Number of UMI per cell", x = "Number of detected genes by cell")
 
@@ -204,62 +281,85 @@ ggplot(pbmc_small@meta.data,
 
 Grâce a ces plots de controles qualites on va pouvoir essayer de differencier les cellules de bonnes qualites des autres. Pour ce faire, on regarde les differentes distributions et on essaye d'identifier deux populations on etabli le seuil comme etant la valeur qui va les separer. Sachant que les cellules de pauvre qualite sont celles qui vont exprimer peu de genes, faiblement et/ou exprimer fortement les genes du genome MT.  
 
+
+On peut aussi s'aider d'une representation en histogramme. Je conseille les trois types de figures car selon le dataset, la methode retenue pour l'identification des outliers est differente.
+
+```{r histQC, fig.keep = 'high'}
+
+hist(pbmc_small$nCount_RNA, 
+     breaks = 100, 
+     xlab = "Number of UMI per cell", 
+     main = "")
+abline(v = 650, col = "red")
+abline(v = 10000, col = "red")
+
+hist(pbmc_small$nFeature_RNA, 
+     breaks = 100, 
+     xlab = "Number of detected genes by cell", 
+     main = "")
+abline(v = 300, col = "red")
+abline(v = 2300, col = "red")
+
+```
+
 #### Seuils des differents filtres
 
-On peut donc identifier les cellules outliers. Dans le dernier plot, on voit un nuage de point qui se decroche du reste des cellules. Sur le dernier violin plot pour la distribution du `percent_mito` on peut choisir le seuil a 10% car les outliers se trouvent plutot au dessus de 10%.
+On peut donc identifier les cellules outliers. Dans le scatter plot, on voit un nuage de point qui se decroche du reste des cellules. Sur le dernier violin plot pour la distribution du `percent_mito` on peut choisir le seuil a 10% car les outliers se trouvent plutot au dessus de 10%. Les histogrammes, quand a eux, nous permettent de reperer les potentiels doublets materialises par des barcodes contenant enormement de UMI et/ou beaucoup plus de genes detectes qui sont completement separes du reste de la distribution. 
 
 Pour filtrer un objet Seurat on utilise simplement la fonction `subset` ou on filtre selon les valeurs contenues dans le dataframe des metadata.
 
 On va retirer toutes les cellules : 
 
-- dont la taille de la librarie est inferieur a 650 UMI
-- qui detectent moins de 300 genes
+- dont la taille de la librarie est inferieur a 650 UMI et superieur a 10 000.
+- qui detectent moins de 300 genes ou plus de 2300.
 - dont le pourcentage de genes du genome MT exprimes depasse 10%.
 
-> Attention le `&` dans la commande subset correspond a un `OU` et non un `ET`. Le pipe (`|`) ne fonctionne pas quand on utilise subset avec un objet seurat
 
-```{r QCFilter}
-#filtering SeuratObject
+```{r QCFilter, results='markup'}
+## Filtering SeuratObject
 pbmc_small <- subset(pbmc_small,
                      percent_mito < 10 &
                        nCount_RNA > 650 &
-                       nFeature_RNA > 300)
+                       nCount_RNA < 10000 &
+                       nFeature_RNA > 300 &
+                       nFeature_RNA < 2300)
 
-#plot
+## Plot
 ggplot(pbmc_small@meta.data, 
-               aes(y = nCount_RNA,
-                   x = nFeature_RNA,
+               aes(x = nCount_RNA,
+                   y = nFeature_RNA,
                    color = percent_mito)) +
   geom_point() +
   scale_y_log10() +
   scale_color_gradient2(low = "green", 
                         high = "red", 
-                        mid = "yellow") +
+                        mid = "yellow", 
+                        midpoint = 20) +
   ggtitle("QC plot after filtering", "Number of detected genes in function of number of UMI")+
   labs(y = "Number of UMI per cell", x = "Number of detected genes by cell")
 
-#update object in R console
+## Update object in R console
 pbmc_small
 
 ```
 
-Cette manipulation de l'objet Seurat va faire que toutes les cellules non retenues seront retirees des differentes matrices d'expression (`@counts` et `@data`) ainsi que du slot `meta.data`. Environ 100 cellules ont ete considerees comme etant de faible qualite et ont ete retirees de l'analyse.
+Cette manipulation de l'objet Seurat va faire que toutes les cellules non retenues seront retirees des differentes matrices d'expression (`@counts` et `@data`) ainsi que du slot `meta.data`. Moins de 100 cellules ont ete considerees comme etant de faible qualite ou etant un doublet et ont ete retirees de l'analyse.
 
 ### Normalisation des donnees
 
 La normalisation des donnees permet de s'affranchir des biais specifiques aux cellules (ex : sequencing depth, amplification, GC content). Elle permet de rendre comparable les libraries. Pour cela on va utiliser la fonction de Seurat, `NormalizeData` qui se base sur l'hypothese que chaque cellule contient la même quantite d'ARN. Avec la methode `logNormalize`, chaque UMI est normalise comme suit, pour chaque cellule : 
 
-> norm_UMI = log2(UMI / nCount_RNA) * scale_factor +1)
+$norm.UMI = log2(\frac{UMI}{nCount.RNA} * scale.factor +1)$
 
-Le `scale_factor` est defini par defaut a 10 000, le plus souvent on utilise la mediane de la taille des libraries (= nombre total d'UMI par cellule, = nCount_RNA dans les meta.data). Si le scale factor est egal a 1e6 alors on obtiendrait des log2(CPM+1). *CPM : Count Per Million*  
+Le `scale.factor` est defini par defaut a 10 000, le plus souvent on utilise la mediane de la taille des libraries (= nombre total d'UMI par cellule, = `nCount_RNA` dans les `meta.data`). Si le scale factor est egal a 1e6 alors on obtiendrait des log2(CPM+1). *CPM : Count Per Million*  
 
 ```{r NormData}
 
-#inter-cell normalization
+## Inter-cell normalization
 pbmc_small <- NormalizeData(pbmc_small,                                   #SeuratObject
-                            assay = "RNA",                                #assay to use
-                            normalization.method = "LogNormalize",        #normalization method
-                            scale.factor = median(pbmc_small$nCount_RNA), #scale factor
+                            assay = "RNA",                                #Assay to use
+                            normalization.method = "LogNormalize",        #Normalization method
+                            scale.factor = median(pbmc_small$nCount_RNA), #Scale factor
                             verbose = TRUE)
   
 
@@ -271,22 +371,23 @@ Le slot `@data` sera mis a jour avec les UMI normalises.
 
 ### Identification des genes les plus variables
 
-On peut representer chaque cellule comme la combinatoire de l'expression de chaque gene. Il y a donc enormement de dimensions ce qui engendre beaucoup de bruit de fond.   
+On peut representer chaque cellule comme la combinatoire de l'expression de chaque gene. Il y a donc enormement de dimensions ce qui engendre beaucoup de complexite.   
 
-Une premiere etape est de retirer les genes qui contiennent tres peu d'information, c'est a dire les genes qui sont peu/pas exprimes ou ceux qui sont exprimes de facon equivalente pour toutes les cellules. Ces genes la ne pourront pas aider a differentier les cellules entre elles. En les retirant, on permettra l'amelioration des methodes de reduction de dimension et de clustering pour une inference statistique fiable (ou en tout cas en enlevant du bruit de fond).
+Une premiere etape est de retirer les genes qui contiennent tres peu d'information, c'est a dire les genes qui sont peu/pas exprimes ou ceux qui sont exprimes de facon equivalente pour toutes les cellules. Ces genes la ne pourront pas aider a differentier les cellules entre elles. En les retirant, on permettra l'amelioration des methodes de reduction de dimension et de clustering pour une inference statistique fiable (ou en tout cas en enlevant de la complexite).
 
 Pour identifier les genes les plus variables on utilise la fonction de Seurat `FindVariableFeatures` avec la methode `vst` qui se base sur la relation entre la moyenne d'expression et la variance de chaque gene. Avec le parametre `nfeatures` on recupere les 2000 genes les plus variables selon la methode vst.
 
 ```{r VariableFeature}
 
 pbmc_small <- FindVariableFeatures(pbmc_small,                 #SeuratObject
-                                   selection.method = "vst",   #method
-                                   nfeatures = 2000)           #top HVG (Highly Variable Gene), default value
+                                   selection.method = "vst",   #Method
+                                   nfeatures = 2000)           #Top HVG (Highly Variable Gene), default value
 pbmc_small
 
-#plot
+## Plot
 VariableFeaturePlot(pbmc_small)
 ```
+
 La fonction `FindVariableFeatures` mets a jour deux slots :  
 
 - `pbmc_small@assays$RNA@var.features` : vecteur des n genes determines comme etant les plus variables
@@ -305,7 +406,10 @@ Afin d'identifier les groupes de cellules, il faut reduire encore l'espace dimen
 
 ### Scaling des data
 
-La premiere etape est de realiser un scaling des data. Cette etape est obligatoire pour pouvoir inferer une PCA. La fonction Seurat `ScaleData` centre et reduit les donnees en ne prenant que les HVG par defaut. Il est possible aussi de lui fournir un vecteur de variables a regresser (le plus souvent on lui donne les noms de colonnes dans le slot `meta.data` associes).
+La premiere etape est de realiser un scaling des data. Cette etape est obligatoire pour pouvoir inferer une PCA. La fonction Seurat `ScaleData` centre et reduit les donnees en ne prenant que les HVG par defaut. Il est possible aussi de lui fournir un vecteur de variables a regresser (le plus souvent on lui donne les noms des colonnes dans le slot `meta.data` des variables que l'on veut regresser). 
+
+$scaled.data(x) = \frac{x - mean(x)}{ standard.deviation(x)}$
+
 
 ```{r ScalingData}
 
@@ -318,67 +422,85 @@ Le slot `nomobjet@assays$RNA@scale.data` est maintenant renseigne. C'est un data
 
 Un espace a 2000 dimensions est toujours trop important pour trouver facilement les similarites et differences entre cellules. On va maintenant utiliser une methode de reduction de dimension appele PCA. Sommairement, la PCA va representer le nuage de point dans les 2000 dimensions puis chercher l'angle qui permettra d'eclater au maximum les cellules sur un plan. Les dimensions resultantes sont appelees composantes principales (PCs) et sont composees d'une combinatoire des precedentes dimensions (les expression de genes).  
 
-Pour cela, nous allons utiliser la fonction Seurat `RunPCA`. Pour des raisons de stockage, le parametre `npcs` permet de garder dans l'objet seurat que les premieres PCs, par defaut les 50 premieres. 
+Je conseille les videos de [Luis Serrano](https://www.youtube.com/watch?v=g-Hb26agBFg) et de [Josh Starmer](https://www.youtube.com/watch?v=FgakZw6K1QQ) qui expliquent pas a pas la PCA en image.
+
+Nous allons utiliser la fonction Seurat `RunPCA`. Pour des raisons de stockage, le parametre `npcs` permet de garder dans l'objet seurat que les premieres PCs, par defaut les 50 premieres. 
 
 ```{r PCA}
 
 pbmc_small <- RunPCA(pbmc_small,                 #SeuratObject
-                     reduction.name = "pca",     #name of the reduction stored in the reduction slot
+                     reduction.name = "pca",     #Name of the reduction stored in the reduction slot
                      npcs = 50,                  #Total Number of PCs to compute and store (50 by default)
                      seed.use = 42,              #Set a random seed. By default, sets the seed to 42.
                      verbose = TRUE)
 
-# Graphic representation of cells
+## Graphic representation of cells
 PCAPlot(pbmc_small,                              #SeuratObject
-        dims = c(1, 2))                          #dimensions (PCs) to plot, default is the first two
+        dims = c(1, 2))                          #Dimensions (PCs) to plot, default is the first two
 
 ```
 
-Le slot `nomobjet@reductions$pca` est maintenant cree, il est compose de plusieurs sous slots :
+Le slot `nomobjet@reductions$pca` est maintenant cree. C'est un objet S4 de classe `DimReduc`, il est compose de plusieurs sous slots :
 
 - `@cell.embeddings` : dataframe des coordonnes des cellules sur les differentes PCs
 - `@feature.loadings` : dataframe des feature loadings (interpretes comme les coefficients de la combinaison lineaire des variables initiales (l'expression des genes) a partir desquelles les PCs sont construites)
-- `feature.loadings.projected` : dataframe des feature loadings projetes (vide)
+- `@feature.loadings.projected` : dataframe des feature loadings projetes (vide)
 - `@assay.used` : nom de l'assay utilise (ici `"RNA"`)
 - `@global` : logique mais pas plus de description trouve sur ce slot
 - `@stdev` : vecteur des standard deviation des PCs stockees
 - `@key` : prefixe utilise pour nommer les PCs, lie au parametre `reduction.key` de `RunPCA`, defaut `PC_`
 - `@jackstraw` : slot prevu pour l'analyse Jack Straw (pour le moment vide)
-- `@misc` : decrit comme etant un slot pour des informations annexes supplementaires (vide)
+- `@misc` : decrit comme etant un slot pour des informations annexes supplementaires (`total variance`)
 
-La fonction de plot represente donc nos cellules dans l'espace dimensionnel des deux premiers PCs de la PCA. Par defaut la colorisation des cellules se base sur l'`active.ident` et donc pour le moment, la colonne `orig.ident` des metadata. 
+La fonction de plot represente nos cellules dans l'espace dimensionnel des deux premiers PCs de la PCA. Par defaut la colorisation des cellules se base sur l'`active.ident` et donc pour le moment, la colonne `orig.ident` des metadata. 
 
 ### Uniform Manifold Approximation and Projection (UMAP)
 
-Nous avons pu reduire les dimensions a 50 mais tout comme les genes, toutes les composantes principales ne contiennent pas forcement de l'information pertinente. Nous allons tout d'abord selectionner les PCs qui vont être utilisees pour le calcul de la UMAP.  
+Nous avons pu reduire les dimensions a 50 mais tout comme les genes, toutes les composantes principales ne contiennent pas forcement de l'information pertinente. Nous allons tout d'abord selectionner les PCs qui vont être utilisees pour le calcul de la UMAP et de la generation des clusters.  
 
 #### Selection des PCs
 
-Pour cela nous pouvons nous baser sur deux methodes, Jack Straw et le Elbow Plot.
+Il existe plusieurs methodes pour selectionner les PCs pertinentes, ici nous allons utiliser le calcul de Jack Straw et le Elbow Plot.
 
 ##### La methode Jack Straw
 
-*WIP*
+Seurat utilise une adaptation de la methode [Jack Straw](https://academic.oup.com/bioinformatics/article/36/10/3107/5788523). Il s'agit d'evaluer la robustesse de la PCA en comparant la composition des PCs avec celle de PCs calculees a partir de donnees permutees.  
+
+La fonction `JackStraw` va effectuer 100 permutations (valeur par defaut du parametre `num.replicate`). A chaque permutation, elle va selectionner aleatoirement 1% des genes les plus variables (proportion par defaut, parametre `prop.freq`). `JackStraw` va melanger les valeurs du slot `nomobjet@assays$RNA@scale.data` filtre sur ces genes puis realiser une PCA sur cette matrice fictive. A partir de ces resultats et pour chaque PC, elle calcule le nombre de fois ou les valeurs des loadings fictifs ($fakevals$) est superieur a chaque valeur du loading observe ($trueval$), tel que :
+
+$Empirical.pval = \frac{sum(fakevals > trueval)}{length(fakevals)}$
+
+La fonction `ScoreJackStraw` utilise le test de l'ecart reduit appele aussi $Z$ test (fonction R `prop.test`). Il permet de tester pour chaque PC si la probabilite que $Empirical.pval$ soit superieure au seuil (parametre `score.thresh`) est differente de la proportion attendue sous une distribution uniforme des p-valeurs.
 
 ```{r JackStraw}
 
 ## JackStraw : Determine statistical significance of PCA scores
 pbmc_small <- JackStraw(pbmc_small,          #SeuratObject
-                        reduction = "pca",   #reduction to analyse
-                        dims = 50,           #number of dimension to analyse
-                        assay = "RNA")       #assay to use
+                        reduction = "pca",   #Reduction to analyse
+                        dims = 50,           #Number of dimension to analyse
+                        assay = "RNA")       #Assay to use
 
 ## Compute Jackstraw scores significance.
 pbmc_small <- ScoreJackStraw(pbmc_small,     #SeuratObject
-                             dims = 1:50)    #number of dimension to analyse
-  
-### Representation JackStrow
+                             dims = 1:50)    #Number of dimension to analyse
+```
+
+Les resultats sont contenus dans le slot `nomobjet@reductions$pca@jackstraw` c'est un objet S4 de classe `JackStrawData` avec differentes informations : 
+
+- `empirical.p.values` : dataframe des p-valeurs pour chaque gene les plus variables (2000, en ligne) et chaque PCs (50, en colonne)
+- `fake.reduction.scores` : dataframe des loadings resultants des PCA sur les donnees permutees. (2000 "genes" x 50 PCs)
+- `empirical.p.values.full` : logique `NA`
+- `overall.p.values` : resultats des p-valeurs du $Z$ test calcule lors de la fonction `ScoreJackStraw`, une valeur par PC
+
+
+```{r plotJackStraw}
+## Representation JackStrow
 JackStrawPlot(pbmc_small,                    #SeuratObject
-              dims = 1:50)                   #number of dimension to plot
+              dims = 1:50)                   #Number of dimension to plot
   
 ```
 
-On cherche un *"saut"* dans les pvaleurs des PCs. On essaye le plus souvent de recuperer les PCs dont la pvaleur est significative. Ici on peut s'arreter a la PC 10 ou 11, car la 12 a une pvaleur 2e-3 puis le reste des PCs ne fait que d'osciller avec des pvaleurs egales a 1. Si on veut etre plus stringeant on peut egalement selectionner que les 8 premieres PCs car ensuite la valeur augmente puis diminue. Le fait d'etre plus stringeant permet de reduire du bruit de fond, en revanche on elimine la possibilite d'observer des similarites plus subtiles entre nos cellules.
+On cherche un *"saut"* dans les pvaleurs des PCs. On essaye le plus souvent de recuperer les PCs dont la pvaleur est significative. Ici on peut s'arreter a la PC 10, car la 11 a une pvaleur 1e-4 puis le reste des PCs ne fait que d'osciller avec des pvaleurs egales a 1. Si on veut etre plus stringeant on peut egalement selectionner que les 8 premieres PCs car ensuite la valeur augmente puis diminue. Le fait d'etre plus stringeant permet de reduire du bruit de fond, en revanche on elimine la possibilite d'observer des similarites plus subtiles entre nos cellules.
 
 ##### La methode de l'Elbow plot
 
@@ -388,50 +510,68 @@ Cette methode consiste a reperer un *"coude"* dans la distribution des standard 
 
 ```{r ElbowPlot}
 ElbowPlot(pbmc_small,           #SeuratObject
-          ndims = 20,           #number of dimension to analyse
-          reduction = "pca")    #reduction to analyse
+          ndims = 20,           #Number of dimension to analyse
+          reduction = "pca")    #Reduction to analyse
 ```
 
 Apres visualisation du Elbow plot avec 50 PCs, nous avons reduit a 20PCs car c'etait trop complique pour observer un coude. Ici on pourrait voir un petit saut dans la distribution entre les PCs 10 et 15 ce qui corroborerait avec les resultats du Jack Straw.
 
 --> On peut determiner le choix du nombre de PCs a **10**. 
 
-#### Inference de la UMAP
+#### Inference de la UMAP (*Uniform Manifold Approximation and Projection*)
 
 Meme si la PCA permet de reduire les dimensions et de nous permettre d'entrapercevoir des groupes de cellules, la methode de la UMAP permet d'ameliorer ce signal. En effet a partir de la matrice de coordonnees de la PCA, il va construire un graphe qui permet de representer nos cellules dans un espace dimensionnel encore plus restreint tout en gardant au maximum la structure global de notre nuage de point initial.  
 
-On utilise d'ailleurs beaucoup plus la UMAP que la t-SNE desormais car cette derniere represente les distances de maniere plus complexes. La structure du nuage de point dans les dimensions d'une t-SNE fait que les distances ne peuvent pas etre reellement considerees comme correles lineairement avec la similarite entre cellules. Grosso modo, les distances de proche en proche entre cellules permet d'affirmer que ces cellules se ressemblent, en revanche les distances entre groupes de cellules ne peuvent pas etre interepreter comme autant different les uns des autres. 
+Resume de la methode :
+
+La UMAP essaye de retrouver un graph des plus proches voisins dans un espace dimensionnel plus faible. La premiere etape est la generation d'un graph kNN (*k nearest neighbors*). Plus k est grand plus cela preserve la structure globale de nos donnees. Au contraire un k plus faible preservera mieux la structure locale. Les connexions entre nos points (cellules) sont ensuite ponderees selon la distance entre deux points, le poids de la connexion entre deux points distants sera plus faible qu'entre deux points proches. Puis on projete les cellules selon ce graph pondere. 
+
+On utilise d'ailleurs beaucoup plus la UMAP que la t-SNE desormais car cette derniere represente les distances de maniere plus complexes. La UMAP permet de mieux equilibrer la balance entre les similarites globales et locales par rapport a la t-SNE (et en plus elle est plus rapide !).
+
+`RunUMAP` est la fonction Seurat qui nous permet de generer une UMAP. Avec le parametre `dims` on peut lui dire quelles sont les PC a garder. 
 
 ```{r UMAP}
 
 pbmc_small <- RunUMAP(pbmc_small,               #SeuratObject
-                      reduction = "pca",        #reduction used to compute UMAP
-                      reduction.key = "UMAP_",  #dimension prefix
-                      assay = "RNA",            #assay to use
-                      dims = 1:10)              #number of PCs to keep (previously determined)
+                      reduction = "pca",        #Reduction used to compute UMAP
+                      reduction.key = "UMAP_",  #Dimension prefix
+                      assay = "RNA",            #Assay to use
+                      dims = 1:10)              #Number of PCs to keep (previously determined)
 
-#plot
+## Plot
 UMAPPlot(pbmc_small)
 ```
 
-*WIP*
+Le slot `nomobjet@reductions$umap` est maintenant cree. C'est un objet S4 de classe `DimReduc`, il est compose de plusieurs sous slots :
+
+- `@cell.embeddings` : dataframe des coordonnes des cellules sur les differentes composantes de la UMAP
+- `@feature.loadings` : (vide pour la UMAP)
+- `feature.loadings.projected` : (vide pour la UMAP)
+- `@assay.used` : nom de l'assay utilise (ici `"RNA"`)
+- `@global` : logique mais pas plus de description trouve sur ce slot
+- `@stdev` : (vide pour la UMAP)
+- `@key` : prefixe utilise pour nommer les PCs, lie au parametre `reduction.key` de `RunUMAP`, defaut `UMAP_`
+- `@jackstraw` : (vide pour la UMAP)
+- `@misc` : decrit comme etant un slot pour des informations annexes supplementaires (vide)
 
 La fonction de plot represente donc nos cellules dans l'espace dimensionnel des deux premieres dimensions de la UMAP. Par defaut la colorisation des cellules se base sur l'`active.ident` donc la colonne `orig.ident` des metadata. 
 
 ## Generation des groupes de cellules
 
-Maintenant que nous pouvons observer des groupes de cellules, il nous faut desormais etre capable de les identifier. Pour cela on va utiliser des methodes computationnelles de regroupement de cellules, appeles clustering.
+Maintenant que nous pouvons observer des groupes de cellules, il nous faut desormais etre capable de les determiner. Pour cela on va utiliser des methodes computationnelles de regroupement de cellules, appeles clustering.
 
 Dans Seurat, on utilisera deux fonctions. `FindNeighbors` permet de construire un graphe des plus proches voisins partages (*Shared Nearest Neighbors*, SNN). Les noeuds representent les cellules et les liens leur proximite dans l'espace dimensionnel de la PCA. Par defaut, cette fonction ne represente que les 20 plus proches voisins. Les liens sont ensuite retires s'il n'y a pas la reciprocite de la proximite.  
 
-A partir de ce graph SNN, `FindClusters` va determiner les clusters en identifiant les groupes de cellules les plus interconnectes base sur l'optimisation de la modularite. Cette methode depend de la resolution que l'on choisit. Plus la resolution est faible, moins il y aura de cluster. Il n'y a pas une seule valeur de resolution valable c'est pour cela que l'on va generer le clustering en s'appuyant sur plusieurs valeurs de resolution et determiner *a posteriori* quelle est celle qui represente le mieux nos populations de cellules.
+A partir de ce graph SNN, `FindClusters` va determiner les clusters en identifiant les groupes de cellules les plus interconnectes base sur l'optimisation de la modularite. Cette methode depend de la resolution que l'on choisit. Plus la resolution est faible, moins il y aura de cluster. 
+
+Il n'y a pas une seule valeur de resolution valable c'est pour cela que l'on va generer le clustering en s'appuyant sur plusieurs valeurs de resolution et determiner *a posteriori* quelle est celle qui represente le mieux nos populations de cellules.
 
 
 ```{r Clustering}
 pbmc_small <- FindNeighbors(pbmc_small,          #SeuratObject
-                            reduction = "pca",   #reduction to used
+                            reduction = "pca",   #Reduction to used
                             k.param = 20,
-                            dims = 1:10)         #number of PCs to keep (previously determined)
+                            dims = 1:10)         #Number of PCs to keep (previously determined)
 
 pbmc_small <- FindClusters(pbmc_small,                                        #SeuratObject
                            resolution = seq(from = 0.2, to = 1.2, by = 0.2),  #Compute clustering with several resolutions (from 0.2 to 1.2 : values usually used)
@@ -441,18 +581,18 @@ pbmc_small <- FindClusters(pbmc_small,                                        #S
 
 `FindNeighbors` construit deux graphes disponibles dans le slot `nomobjet@graphs` ou l'on peut retrouver toutes les informations sur les graphes NN (nearest neighbors) et SNN (shared nearest neighbors).  
 
-`FindClusters` ajoute des colonnes dans les metadata avec le prefixe `[nomassay]_[nomgraph]_res.` suivi par les differentes resolutions computes ainsi que la colonne `seurat_clusters` correspondant aux clusters determines lors de la derniere resolution calculee. L'identite des cellules par defaut contenu dans le slot `active.ident` a maintenant change et correspond aussi a l'identite des clusters de la derniere resolution calculee. Chaque colonne va donc associe un numero de cluster pour chaque cellule. Les numeros de clusters sont attribues selon leur taille (ainsi le cluster 0 sera toujours celui qui sera compose du plus de cellule, et ainsi de suite).  
+`FindClusters` ajoute des colonnes dans les metadata avec le prefixe `[nomassay]_[nomgraph]_res.` suivi par les differentes resolutions computes ainsi que la colonne `seurat_clusters` correspondant aux clusters determines lors de la derniere resolution calculee. L'identite des cellules par defaut contenu dans le slot `active.ident` a maintenant change et correspond aussi a l'identite des clusters de la derniere resolution calculee. Chaque colonne va donc associe un numero de cluster pour chaque cellule. Les numeros de clusters sont attribues selon leur taille (ainsi le cluster 0 sera toujours celui qui sera compose du plus de cellules, et ainsi de suite).  
 
 ```{r metadata_post_clustering, results='markup'}
-knitr::kable(head(pbmc_small@meta.data), "simple") # preview of the cell metadata
+paged_table(head(pbmc_small@meta.data)) #Preview of the cell metadata
 ```
 
 
 #### Quelle resolution choisir ?
 
-Nous avons plusieurs sets de clusters calcules sur la base de differentes resolutions. Il faut maintenant choisir quelle resolution represente le mieux nos populations de cellules. Un outil permet de nous aiguiller dans ce choix, le package `Clustree` qui represente les relations et la distribution des cellules au sein des clusters aux differentes resolutions. 
+Nous avons plusieurs sets de clusters calcules sur la base de differentes resolutions. Il faut maintenant choisir quelle resolution represente le mieux nos populations de cellules. Le package `clustree` permet de nous aiguiller dans ce choix. Il represente les relations et la distribution des cellules au sein des clusters aux differentes resolutions. 
 
-On utilise pour cela la fonction du meme nom `clustree` qui prend en compte les objets seurat, nous avons juste besoin de lui renseigner le prefixe qui permettra de recuperer toutes les colonnes de resolutions dans nos metadata. Il y a plusieurs autres parametres pour changer l'esthetique de la figure mais ici nous allons tout laisse par defaut.  
+On utilise pour cela la fonction du meme nom qui prend en compte les objets seurat, nous avons juste besoin de lui renseigner le prefixe qui permettra de recuperer toutes les colonnes de resolutions dans nos metadata. Lorsque ce prefix est retire il ne doit laisser que la valeur de resolution pour que `clustree` puisse fonctionner. Il y a plusieurs autres parametres pour changer l'esthetique de la figure mais ici nous allons tout laisser par defaut.  
 
 ```{r Clustree}
 clustree(pbmc_small,               #SeuratObject
@@ -461,32 +601,24 @@ clustree(pbmc_small,               #SeuratObject
 
 Chaque point correspond a un cluster dont la taille represente le nombre de cellule qui le compose et la couleur, la resolution du clustering. La premiere resolution (en haut) sera toujours la resolution la plus faible, puis on retrace le chemin de chaque cellule au travers des clusters des differentes resolutions (de plus en plus grande) grace aux fleches. On analyse ici 6 resolutions de 0.2 en rouge jusqu'a 1.2 en rose.  
 
-Les fleches representent la distribution des clusters d'une resolution plus faible vers les clusters d'une resolution plus elevee. Par exemple, les cellules du cluster 0 de la resolution 0.2 en rouge se repartissent dans les clusters 0 et 1 de la resolution 0.4 en vert kaki. Tandis que le cluster 2 de la resolution 0.2 est compose des memes cellules que le cluster 2 de la resolution 0.4. La couleur des fleches correspond au nombre de cellules du cluster *"parent"* qui alimente le cluster *"enfant"*. L'opacite des fleches represente la proportion de cellules provenant du cluster *"parent"*. C'est sur ce point que clustree nous permet d'identifier la resolution a choisir. Si un cluster a plusieurs origines alors on considere que l'on a trop clusterise les cellules et qu'il faut choisir une resolution plus faible.
+Les fleches representent la distribution des clusters d'une resolution plus faible vers les clusters d'une resolution plus elevee. Par exemple, les cellules du cluster 0 de la resolution 0.2 en rouge se repartissent dans les clusters 0 et 2 de la resolution 0.4 en vert kaki. Tandis que le cluster 3 de la resolution 0.2 est compose des memes cellules que le cluster 3 de la resolution 0.4. La couleur des fleches correspond au nombre de cellules du cluster *"parent"* qui alimente le cluster *"enfant"*. L'opacite des fleches represente la proportion de cellules provenant du cluster *"parent"*. C'est sur ce point que clustree nous permet d'identifier la resolution a choisir. Si un cluster a plusieurs origines alors on considere que l'on a trop clusterise les cellules et qu'il faut choisir une resolution plus faible.
 
 On peut observer les faits suivants : 
 
 - Les clustering obtenus a partir des resolutions 0.4 et 0.6 sont identiques.
-- Tous les clusters ont une seule origine, sauf le cluster 10 de la resolution 1.0.
-- Le cluster 10 de la resolution 1.0 est compose majoritairement du cluster 0 de la resolution 0.8 et environ 20% du cluster 4 de la resolution 0.8
-- Ce meme cluster 10 ne donne pas de *"descendance"* a la resolution 1.2
+- Les clusters 3, 4 et 5 de la resolution 0.2 sont robustes jusqu'a la resolution 1.2
 
-Ce dernier fait est inattendu car les cellules du cluster 10 de la resolution 1.0 n'ont pas disparu a la resolution 1.2. Dans quels clusters de la resolution 1.2 se retrouvent les cellules du cluster 10 de la resolution 1.0 ?
+Les resultats de clustree etant vraiment propres (pas de clusters ayant plusieurs origines), il est difficile de determiner quelle resolution choisir sans *a priori*. Nous pouvons toujours nous aider de la connaissance de notre dataset pour nous orienter sur le nombre attendu de populations de cellules. Si nous n'avons aucune idee, il vaut mieux s'appuyer sur une resolution assez faible, identifier les populations a l'aide de l'analyse des marqueurs. Si cela n'est pas concluant, on peut tout à fait revenir sur le choix de la resolution pour choisir un clustering plus fin ou plus general.  
 
-```{r, results='markup'}
-table(subset(pbmc_small@meta.data, RNA_snn_res.1 == 10, select = "RNA_snn_res.1.2"))
-```
-
-Les cellules du cluster 10 se retrouvent majoritairement dans le cluster 2 puis dans le cluster 5 de la resolution 1.2.
-
-Le choix de la resolution serait 0.8 car apres cela devient plus brouillon. On peut aussi s'aider de la connaissance de notre dataset pour nous orienter sur le nombre de populations de cellules attendu.  
+Ici nous allons choisir la resolution 0.4 ou 0.6 car elles sont identiques donc avec des clusters plutot robustes. On pourrait imaginer utiliser les clustering 0.8 a 1.2 pour identifier des sous populations.
 
 On va mettre a jour l'identite par defaut des cellules qui sont accessibles via la fonction `Idents`. Il y a plusieurs maniere de modifier l'identite active en lui renseignant soit un vecteur compose des identites des cellules, soit le nom d'une colonne dans nos metadata.
 
-```{r SetIdents}
-##Set the default resolution level
-Idents(pbmc_small) <- "RNA_snn_res.0.8"
+```{r SetIdents, results='markup'}
+## Set the default resolution level
+Idents(pbmc_small) <- "RNA_snn_res.0.4"
 
-##visualize clusters in UMAP coordinates
+## Visualize clusters in UMAP coordinates
 UMAPPlot(pbmc_small,          #SeuratObject
          label = TRUE,        #Plot label on the plot
          label.size = 4)      #Change label size
@@ -495,7 +627,7 @@ UMAPPlot(pbmc_small,          #SeuratObject
 
 ## Identification et analyses des marqueurs
 
-Nous avons maintenant regroupe nos cellules selon leur profil transcriptomique, il va falloir desormais les identifier. Si on a une connaissance assez pousse de notre dataset, on peut visualiser l'expression des genes specifiques des populations attendues sur la UMAP par exemple ou en Violin Plot afin de determiner quel cluster va les exprimer le plus. Il est aussi possible d'identifier les marqueurs specifiques de chaque cluster en utilisant differents tests d'expression differentielle.  
+Nous avons maintenant regroupe nos cellules selon leur profil transcriptomique, il va falloir desormais les identifier biologiquement. Si on a une connaissance assez pousse de notre dataset, on peut visualiser l'expression des genes specifiques des populations attendues sur la UMAP par exemple ou en Violin Plot afin de determiner quel cluster va les exprimer le plus. Il est aussi possible d'identifier les marqueurs specifiques de chaque cluster en utilisant differents tests d'expression differentielle.  
 
 ### Identification des marqueurs
 
@@ -511,10 +643,15 @@ FeaturePlot(pbmc_small,                     #SeuratObject
             features = "ENSG00000156738",   #Value to plot, can be a vector of several variable
             reduction = "umap",             #Dimensional reduction to use
             label = TRUE,                   #Plot label on the plot
-            label.size = 4)                 #Change label size
+            label.size = 4) +               #Change label size
+  ggtitle(annotated_hg19[annotated_hg19$ensembl_gene_id == "ENSG00000156738", "external_gene_name"],
+          "ENSG00000156738")
 
 VlnPlot(pbmc_small,                         #SeuratObject
-        features = "ENSG00000156738")       #Variable to plot
+        features = "ENSG00000156738") +     #Variable to plot
+  ggtitle(annotated_hg19[annotated_hg19$ensembl_gene_id == "ENSG00000156738", "external_gene_name"],
+          "ENSG00000156738")
+
 ```
 
 Avec ces resultats on peut considerer le cluster 3 comme etant compose de cellules B.
@@ -524,44 +661,743 @@ Avec ces resultats on peut considerer le cluster 3 comme etant compose de cellul
 
 Il est cependant parfois difficile d'utiliser cette methode pour chacun de nos clusters. Seurat nous propose d'identifier les marqueurs specifique de chaque cluster grace a une methode d'analyse differentielle d'expression. 
 
-Pour chaque cluster et chaque gene, la fonction `FindAllMarkers` va determiner s'il y a une difference significative entre l'expression du gene des cellules de notre cluster et les autres cellules. Par defaut, il utilise le test non parametrique de Wilcoxon Rank Sum (ou appele Mann-Whitney). 
+Pour chaque cluster et chaque gene, la fonction `FindAllMarkers` va determiner s'il y a une difference significative entre l'expression du gene des cellules de notre cluster et les autres cellules. Par defaut, il utilise le test non parametrique de Wilcoxon Rank Sum (ou appele Mann-Whitney). Il effectue ensuite un test de correction multiple de Bonferroni.
 
-```{r FindMarkers}
+```{r FindAllMarkers}
 
 pbmc_markers <- FindAllMarkers(pbmc_small,              #SeuratObject
                                only.pos = FALSE,        #Returns positive and negative gene markers
                                min.pct = 0.1,           #Take into account genes that are detected in at least 10% of the cells
-                               logfc.threshold = 0.25,  #Return markers with a logFC superior to threshold
+                               logfc.threshold = 0,     #Return markers with a logFC superior to threshold
                                test.use = "wilcox",     #Method used
                                verbose = FALSE)   
 
-#Preview of the resulting dataframe
-knitr::kable(head(pbmc_markers), "simple")
+## Preview of the resulting dataframe
+paged_table(head(pbmc_markers))
 ```
 
 Le resultat de cette fonction est un dataframe avec plusieurs colonnes : 
 
-- `p_val` : p-valeur du test utilise
+- `p_val` : p-valeur du test statistique utilise
 - `avg_log2FC` : log2(Fold change +1) entre la moyenne d'expression du cluster considere et la moyenne d'expression du reste des cellules
 - `pct.1` : pourcentage de detection du gene au sein de notre cluster
 - `pct.2`: pourcentage de detectection du gene au sein du reste des cellules
-- `p_val_adj` : p-valeur ajustee
+- `p_val_adj` : p-valeur ajustee (Correction de Bonferroni)
 - `cluster` : cluster considere
 - `gene` : nom du gene
 
-> Attention ne pas prendre en compte le noms des lignes dans ce dataframe. En effet, il est assez frequent qu'un gene soit defini comme marqueur pour plusieurs cluster ce qui va dupliquer les noms de lignes et donc rajouter des suffixes dans les rownames.
+> Attention ne pas prendre en compte le noms des lignes dans ce dataframe pour reference. En effet, il est assez frequent qu'un gene soit defini comme marqueur pour plusieurs clusters ce qui va dupliquer les noms de lignes et donc rajouter des suffixes dans les rownames. On reviendrait dans la meme problematique que si on utilisait les gene names lors du `Read10X`.
 
-```{r FilterMarkers, results='markup'}
-
-pbmc_markers <- subset(pbmc_markers, p_val_adj < 0.05) #filter dataframe based on p_val_adj column
-
-table(pbmc_markers$cluster)
-
-```
+Ici nous avons change certains parametres pour ne filtrer aucun gene ce qui nous sera tres pratique pour les analyses d'enrichissement (GSEA) qui se basent sur une liste de gene ordonnes.
 
 
 ### Annotation des marqueurs
+
+Chaque cluster est associe a une liste de genes marqueurs qu'il nous faut maintenant annoter afin d'identifier biologiquement les clusters de cellules. On va commencer par annoter les identifiants des genes avec Biomart puis utiliser des methodes d'enrichissement fonctionnels pour trouver les fonctions partagees par les genes marqueurs.
+
 #### Via Biomart
+
+On va utiliser le dataframe que nous avons genere au debut de l'analyse pour nous permettre d'ajouter le nom du gene et une description pour chaque ensembl gene ID.
+
+```{r MarkersBiomart}
+
+## Merge markers results with biomart annotation
+pbmc_markers_annotated <- merge(x = pbmc_markers,         #First df to merge
+                                y = annotated_hg19,       #Second df to merge
+                                by.x = "gene",            #Column name of first df used for matching lines
+                                by.y = "ensembl_gene_id", #Column name of second df used for matching lines
+                                all.x = TRUE)             #Keep all lines from first df even if there is no match with second df
+```
+
+Nous allons maintenant retire tous les marqueurs ou la p-valeur ajustee est superieur au seuil de 5% et avec la valeur absolue du log(Fold Change) moyen inferieur a 0.25 afin d'obtenir la liste des marqueurs avec un differentiel d'expression significatif.
+
+```{r FilterMarkers, results = 'markup', fig.height = 8}
+
+pbmc_markers_signif <- subset(pbmc_markers_annotated, 
+                              p_val_adj < 0.05 & 
+                                abs(avg_log2FC) >= 0.25)       #Filter dataframe based on p_val_adj column
+
+## Number of significative DEG per cluster
+table(pbmc_markers_signif$cluster)
+
+## Sorting results by cluster and by average log2(Fold Change)
+pbmc_markers_signif <- pbmc_markers_signif %>%                 #Rearrange df with dplyr package
+  group_by(cluster) %>%                                        #Group df based on cluster column
+  arrange(desc(avg_log2FC), .by_group = TRUE)                  #Sort lines by descending the column avg_log2FC and by group
+
+## Most DE gene marker for each cluster
+paged_table(top_n(x= pbmc_markers_signif, n = 3, wt = avg_log2FC))
+
+## Generate feature plots and stock them into variable
+plots <- FeaturePlot(pbmc_small,                                                                #SeuratObject
+                     features = top_n(x= pbmc_markers_signif, n = 1, wt = avg_log2FC)$gene,     #Vector of genes to plot
+                     cols = c("yellow", "red"),                                                 #Change color
+                     label = TRUE,                                                              #Plot ident position
+                     combine = FALSE,                                                           #Return list of plot objets instead of a combined plot (easier to process)
+                     repel = TRUE)                                                              #Avoid label overlap
+
+## Add gene name as title
+plots <- lapply(plots,                                                                          #List of plots
+                add_title_gene_name,                                                            #Function to apply to the list
+                gene_format = annotated_hg19)                                                   #Fill in the dataframe parameter
+
+## Plot list of plots
+grid.arrange(grobs = plots)
+
+## Generate violin plots and stock them into variable
+vln_plots <- VlnPlot(pbmc_small,                                                                #SeuratObject
+                     features = top_n(x= pbmc_markers_signif, n = 1, wt = avg_log2FC)$gene,     #Vector of genes to plot
+                     combine = FALSE)                                                           #Return list of plot objets instead of a combined plot (easier to process)
+
+## Add gene name as title
+vln_plots <- lapply(vln_plots,                                                                  #List of plots
+                    add_title_gene_name,                                                        #Function to apply to the list
+                    gene_format = annotated_hg19)                                               #Fill in the dataframe parameter
+
+## Remove unecessary legend
+vln_plots <- lapply(vln_plots, function(plot){
+  plot <- plot + theme(legend.position = "none")
+  return(plot)
+})
+
+## Plot list of plots
+grid.arrange(grobs = vln_plots)
+
+```
+
+Nous avons maintenant chaque ensembl gene ID associe a un gene name et a une description pour nous aider a identifier les listes de genes. C'est simple si on connait la theorie de la biologie de notre systeme mais si on ne connait pas suffisamment les genes identifies comme marqueurs, les methodes d'enrichissement vont pouvoir nous aider.
+
+
 #### Via ClusterProfiler
 
+Pour comprendre le lien entre les genes specifiques a nos clusters on peut utiliser des methodes d'enrichissement fonctionnel. Il en existe deux types : 
+
+- les methodes de sur-representation (Over-Representation Analysis) qui se base sur un ratio entre le nombre de genes marqueurs present dans un groupe de gene fonctionnel (*gene set*) et le nombre total de gene present dans ce gene set.
+- les methodes de Gene Set Enrichment Analysis (GSEA) qui calcule un taux d'enrichissement a partir d'un ranking des genes.
+
+Un package R nous permettra de pouvoir realiser ces differentes analyses en utilisant plusieurs bases de donnees. Il est assez complet et je vous conseille de prendre le temps de regarder la [documentation](https://yulab-smu.top/biomedical-knowledge-mining-book/index.html) car ici nous ne verrons qu'un petit apercu.
+
+##### Gene Ontholgy
+
+On va commencer par analyser nos listes de genes avec l'annotation [Gene Ontology](http://geneontology.org/) qui classifie les genes en gene set selon trois grands types d'information : 
+
+- Fonction Moleculaire (MF) : activite proteique du produit des genes
+- Processus Biologique (BP) : ensemble d'activites proteique menant une tache commune
+- Composant Cellulaire (CC) : localisation du produit des genes
+
+Chaque ensemble de gene sont appeles des gene set et sont regroupes selon les termes de la Gene Ontology (que l'on appelera ici terme GO). Les termes GO sont classifies en arborescence avec des gene sets generaux qui se specifient au fur et a mesure. Les relations entre les termes GO peuvent traduire differents cas : 
+
+- `is a` : le terme GO A est un sous-type du terme GO B
+- `part of` : le terme GO A fait parti du terme GO B, donc si le terme GO A est present alors le terme GO B aussi
+- `has part`: le terme GO A contient obligatoirement le terme GO B, mais s'il y a le terme GO B il n'y a pas forcement le terme GO A
+- `regulates` : le terme GO A impacte necessairement le terme GO B, mais ce dernier n'est pas forcement impacte par A
+
+Dans le package `ClusterProfiler` nous allons utiliser la fonction `enrichGO` qui calcule pour chaque terme GO la sur-representation des genes du cluster analyse parmis ceux du terme. 
+
+Pour utiliser la base de donnees de la Gene Ontology, nous utilisons un package R contenant toute l'annotation de l'organisme voulu. Ces differents packages sont appeles `OrgDb` que l'on peut retrouver sous la forme `org.[Initiales du genome].eg.db` (pour l'annotation humaine, l'OrgDb est `org.Hs.eg.db`). Ils contiennent les identifiants des genes de differentes ressources (NCBI, Ensembl, RefSeq, etc...) avec l'annotation de differentes bases de donnees (GO, OMIM, PMID, Uniprot, etc...). Les identifiants de genes par defaut sont sous le format `entrez` (qui est une suite de chiffres). Sachant que nous avons a notre disposition uniquement les identifiants Ensembl ou le *gene name*, nous allons nous servir du parametre `keyType` de la fonction `enrichGO` pour utiliser les *gene names* au lieu des identifiants entrez et ainsi utiliser les differentes informations contenues dans l'`Org.Db`.
+
+```{r OrgDB, eval=FALSE}
+## What's inside an organism database ?
+ls("package:org.Hs.eg.db")
+
+## You must see the help section of category you want to know about and don't hesite to test the examples to understand the architecture
+?org.Hs.egENSEMBL    #Link between ensembl ID and entrez ID
+?org.Hs.egSYMBOL2EG  #Link between entrez ID and gene name
+?org.Hs.egSYMBOL     #Link between gene name and entrez ID
+?org.Hs.egGENENAME   #Beware ! It concern gene description and not gene name as we know
+
+## Different available mapping variable name
+columns(org.Hs.eg.db)
+
+```
+
+Nous allons donc appliquer la fonction `enrichGO` pour chacun des clusters grace a un `lapply`. Pour chaque cluster : 
+
+- On filtre le dataframe du resultat des marqueurs pour ne recuperer que les lignes concernant les genes surexprimes par les cellules du cluster.
+- On lance la fonction `enrichGO` pour obtenir les termes GO (BP, CC et MF) enrichis dans le set de genes marqueurs.
+- On ajoute le nom du cluster dans une nouvelle colonne au dataframe resultant
+- On visualise les resultats avec la fonction `dotplot` du package `enrichR` qui permet de visualiser les 3 premiers termes GO pour chaque type d'ontologie
+
+Le resultat du lapply est donc une liste ou chaque element de la liste est un dataframe de resultat pour chaque cluster. On va ensuite assembler les resultats avec la fonction `do.call` qui applique une fonction a l'ensemble de la liste. Le `rbind` va concatener les lignes de tous les elements de la liste pour n'avoir qu'un seul dataframe avec les resultats de chaque cluster.
+
+```{r clusterGO, fig.height = 3}
+
+## GO enrichment for all clusters
+enrich_go_list <- lapply(levels(pbmc_markers_signif$cluster), function(cluster_name){
+  
+  res_markers <- subset(pbmc_markers_signif, cluster == cluster_name & avg_log2FC > 0) #Filter markers to retrieve only positive markers for the specific cluster
+  
+  ego <- enrichGO(gene = res_markers$external_gene_name,                 #Vector of target genes
+                  universe = unique(annotated_hg19$external_gene_name),  #Vector of reference genes (all genes from the differential analysis)
+                  OrgDb = "org.Hs.eg.db",                                #Organisme database
+                  keyType = "SYMBOL",                                    #Column name of the OrgDB that convert gene format in `gene`parameter to entrez ID
+                  ont = "ALL")                                           #What category of GO you want to analyse (BP, CC, MF or ALL)
+  
+  ego@result$cluster <- cluster_name                                     #Add cluster name in a new column named "cluster"
+  
+  ## visualisation
+  ### don't forget to add print when inside a function/loop/lapply
+  print(dotplot(ego,                                                     #enrichResult object
+                split = "ONTOLOGY",                                      #Do separated plot for each ontology type (only valable fo GO results)                                      
+                showCategory = 3,                                        #Only show first three categories
+                title = paste("Cluster", cluster_name)) +                #Add title
+    facet_grid(ONTOLOGY~., scales = "free_y") +                          #Create subplot according to type used with `split = "ONTOLOGY"`
+    theme(axis.text.y = element_text(size = 5),
+                legend.key.size = unit(0.2, 'cm')))                      #Reduce ontology labels names
+  return(ego@result)
+})
+
+enrich_go <- do.call("rbind", enrich_go_list)                            #Bind all results together
+enrich_go <- enrich_go %>%                                              
+  group_by(cluster, ONTOLOGY)                                            #Rearrange df according to cluster and ontology type
+
+
+## show first results
+paged_table(top_n(x= enrich_go, n = 3, wt = (Count))[,-9])               #Only remove list of genes for the visualisation
+
+```
+
+Le resultat est un dataframe ou les termes GO ont ete consideres comme enrichis :
+
+- `ONTOLOGY` : type d'ontologie (BP, CC, ou MF)
+- `ID` : Identifiant unique du terme GO
+- `Description` : Description du terme GO
+- `GeneRatio` : Fraction representant le nombre de genes marqueur presents dans le terme GO `nbr_marker_gene_in_GOterm / nbr_marker_gene`
+- `BgRatio` : Fraction representant le nombre de genes de la reference presents dans le terme GO `nbr_total_gene_in_GOterm / nbr_total_gene`
+- `pvalue` : p-valeur du test d'enrichissement
+- `p.adjust` : p-valeur ajustee du test de Benjamini Hochberg
+- `qvalue` : q-valeur apres controle du FDR (False Discovery Rate)
+- `geneID` : Chaine de caractere qui contient la liste des genes marqueurs presents dans le terme GO (separe par des `/`)
+- `Count` : Nombre de genes marqueurs present dans le terme GO
+- `cluster` : Colonne ajoutee avant le `do.call("rbind", list)` afin de reperer dans quel cluster le terme GO a ete considere comme enrichis.
+
+Un terme GO a ete considere comme enrichi si :
+
+- la p-valeur < 0.05
+- la p-valeur ajustee < 0.05
+- la q-valeur < 0.2
+
+
+##### Kyoto Encyclopedia of Genes and Genomes (KEGG)
+
+[KEGG](http://www.genome.jp/kegg/) est une base de donnees qui se concentre sur l'annotation moleculaire des differentes voies metaboliques. Elle permet de decrire les reactions biochimiques que composent la voie. KEGG permet aussi de visualiser ces voies a travers des cartes dessinees a la main representant les differentes reactions et la relation entre les genes. Il y a plusieurs grandes categories de voies KEGG : 
+
+- Metabolisme
+- Traitement de l'information genetique
+- Traitement de l'information environnementale
+- Processus cellulaires
+- Systemes organiques
+- Maladies humaines
+- Developpement de medicaments
+
+Nous allons utiliser la fonction `enrichKEGG` du package `ClusterProfiler`. Cette fonction ne fonctionne pas exactement comme `enrichGO` car il n'utilise pas de package `Orgdb` et donc le parametre `keyType` n'existe pas mais il est demande que nos genes soient annotes en entrez id. Il faudra trouver un autre moyen pour convertir nos genes dans le bon format. 
+
+Pour cela, on va s'aider de l'`Orgdb` ou `org.Hs.egSYMBOL` est un objet `AnnDBimap` permettant de recenser pour chaque identifiant entrez son "*gene symbol*". Lorsque l'on converti cet objet en dataframe nous obtenons une table de deux colonnes (`gene_id` et `symbol`). Nous avons donc maintenant la possibilite de passer d'un gene name a un entrez id.
+
+Nous allons donc appliquer la fonction `enrichKEGG` pour chacun des clusters grace a un `lapply`. Pour chaque cluster : 
+
+- On filtre le dataframe du resultat des marqueurs pour ne recuperer que les lignes concernant les genes surexprimes par les cellules du cluster.
+- On lance la fonction `enrichGO` pour obtenir les termes KEGG enrichis dans le set de genes marqueurs, on filtre notre table de correspondance entrez/symbol pour les parametres `gene` et `universe` avec les gene names contenues dans les tables de marqueurs et d'annotation biomart.
+- On ajoute le nom du cluster dans une nouvelle colonne au dataframe resultant
+- On visualise les resultats avec la fonction `dotplot` du package `enrichR` qui permet de visualiser les 5 premiers termes KEGG
+
+```{r clusterKEGG, fig.height = 3}
+## Retrieve a corresponding table between entrez id and gene name (called gene symbol in org.db)
+corresp_entrez <- as.data.frame(org.Hs.egSYMBOL)  #Change format to df
+
+## Apply enrichKEGG for each cluster
+enrich_kegg_list <- lapply(levels(pbmc_markers_signif$cluster), function(cluster_name){
+  
+  res_markers <- subset(pbmc_markers_signif, cluster == cluster_name & avg_log2FC > 0) #Filter markers dataframe based on cluster
+  
+  ## Perform enrichKEGG analysis
+  ekegg <- enrichKEGG(gene = subset(corresp_entrez, symbol %in% res_markers$external_gene_name)$gene_id,                #Genes to analyse
+                      universe = subset(corresp_entrez, symbol %in% unique(annotated_hg19$external_gene_name))$gene_id, #Background genes, here we take all genes from our expression matrix
+                      organism = "hsa")
+  
+  ekegg@result$cluster <- cluster_name            #Add cluster name as column
+  
+  ## Add plot
+  print(dotplot(ekegg,
+                label_format = 30,
+                font.size = 10,
+                showCategory = 5,
+                title = paste("Cluster", cluster_name)) +
+    theme(axis.text.y = element_text(size = 10),
+                legend.key.size = unit(0.2, 'cm')))
+  
+  return(ekegg@result)                            #Return dataframe result
+})
+
+## Concatenate all results in one dataframe
+enrich_kegg <- do.call("rbind", enrich_kegg_list)
+
+## Group result by cluster (easier to manipulate with dplyr)
+enrich_kegg <- enrich_kegg %>% 
+  group_by(cluster)
+
+## Visualise first 3 KEGG categories for each cluster (removing the vector of genes just for the visualisation)
+paged_table(top_n(x= enrich_kegg, n = 3, wt = (Count))[,-8])
+```
+
+
+Le resultat est un dataframe ou les categories KEGG ont ete considerees comme enrichies :
+
+- `ID` : Identifiant unique de la categorie KEGG
+- `Description` : Description de la categorie KEGG
+- `GeneRatio` : Fraction representant le nombre de genes marqueur presents dans la categorie KEGG $GeneRatio = \frac{nbrMarkerGeneInKEGGcat}{nbrMarkerGene}$
+- `BgRatio` : Fraction representant le nombre de genes de la reference presents dans la categorie KEGG $BgRatio = \frac{nbrTotalGeneInKEGGcat}{nbrTotalGene}$
+- `pvalue` : p-valeur du test d'enrichissement
+- `p.adjust` : p-valeur ajustee du test de Benjamini Hochberg
+- `qvalue` : q-valeur apres controle du FDR (False Discovery Rate)
+- `geneID` : Chaine de caractere qui contient la liste des genes marqueurs presents dans la categorie KEGG (separe par des `/`)
+- `Count` : Nombre de genes marqueurs present dans la categorie KEGG
+- `cluster` : Colonne ajoutee avant le `do.call("rbind", list)` afin de reperer dans quel cluster la categorie KEGG a ete considere comme enrichies.
+
+Une categorie KEGG a ete consideree comme enrichie si :
+
+- la p-valeur < 0.05
+- la p-valeur ajustee < 0.05
+- la q-valeur < 0.2
+
+
+Ces methodes de sur-representations dependent enormement de la base de donnees contenant des groupes de genes assez generalistes. Nous pouvons cependant constater que les resultats de `enrichGO`, `enrichKEGG` et Biomart se croisent pour certains clusters ou : 
+
+- le cluster 6 representerait les cellules *Natural Killer* ainsi que le cluster 4 : sachant qu'ils sont tres proches sur la UMAP cela reflete leur proximite des transcriptomes des cellules que composent ces deux clusters. L'analyse GO pencherait cependant plutot sur des cellules T pour le cluster 4. 
+- le cluster 8 serait compose des cellules des plaquettes
+
+Sachant quand prenant uniquement les 3 ou les 5 premiers resultats (donc tres restreint), nous sommes extremement stringeant dans l'identification des clusters.
+
+##### GSEA : Gene Set Enrichment Analysis
+
+Les analyses d'enrichissement [GSEA](https://www.gsea-msigdb.org/gsea/index.jsp) se basent sur un *ranking* des genes. Afin de prendre en compte a la fois le sens de la deregulation et sa significativite nous ordonnons les genes selon : 
+
+$x = sign(avg.log2FC) * -log10(pval)$
+
+Sachant que la fonction `sign` dans $R$ permet de retourner le signe du log2(FC) moyen. C'est a dire quand les genes sont sous exprimes la valeur retournee par la fonction est `-1`, `+1` lorsque le FC est positif et `0` quand le gene n'est pas deregule. 
+
+Le fait de prendre en compte la significativite de la deregulation engendre parfois des complications. En effet, il arrive que la fonction `FindAllMarkers` retourne des p-valeurs tellement faibles qu'elles deviennent nulles ce qui produit des valeurs `Inf` ne pouvant etre traitees par GSEA. Pour palier a ce probleme et uniquement pour ce cas de figure, on remplace $-log10(pval)$ par $-log10(1e-323)$ car `1e-323` serait la plus petite valeur pouvant etre representee par un ordinateur.
+
+```{r SmallestValue, results='asis'}
+
+print(1e-323) ## equal 9.881313e-324
+print(1e-324) ## equal 0
+
+```
+
+GSEA va calculer un score d'enrichissement pour chaque set de genes analyses a partir de ce vecteur contenant les genes ordonnes selon leur significativite.
+
+Pour chaque signature (et pour chaque cluster), GSEA va calculer le score d'enrichissement en parcourant le vecteur des genes ordonnes, le score est incremente s'il rencontre un gene du *gene set* analyse et le diminuer si a l'inverse il rencontre un gene ne faisant pas parti du *gene set*. Le score d'enrichissement (ES) est la valeur maximale lors de l'incrementation.
+
+Les resultats de la fonction `GSEA` sera un dataframe avec les colonnes suivantes : 
+
+- `ID ` : Identifiant du groupe de genes analyse
+- `setSize` : Taille du groupe de gene
+- `enrichmentScore` (ES): Score d'enrichissement representant le degre de la presence du *gene set* dans la liste ordonne des genes
+- `NES` (Normalized Enrichment Score) : Score d'enrichissement normalise tel que : 
+ $NES = \frac{actual ES}{mean(ESs Against All Permutations Of The Dataset)}$
+- `pvalue` : p-valeur du test d'enrichissement
+- `p.adjust` : p-valeur ajustee du test de Benjamini Hochberg
+- `qvalue` : q-valeur apres controle du FDR (False Discovery Rate)
+- `rank` : Position dans la liste des genes pour laquelle ES est atteint 
+- `leading_edge` : Trois statistiques calcule lors de l'analyse :
+    - `Tags` : Pourcentage des genes du *gene set* avant ou apres le pic de l'ES selon s'il est positif ou negatif
+    - `List` : Pourcentage des genes avant ou apres le pic de l'ES selon s'il est positif ou negatif
+    - `Signal` : Force du signal d'enrichissement calcule : $(Tag)(1 - List)(\displaystyle \frac{N}{N - Nh})$
+- `cluster` : Nom du cluster pour lequel le groupe de genes a ete identifie comme significatif
+
+Le format des *gene sets* utilises pour la fonction `GSEA` doit etre une table de correspondance (`TERM2GENE`) qui associe le nom d'une signature avec les genes qui la compose. Cependant ce n'est pas comme le format `gmt` ou une ligne correspond a une signature, ici il y a bien une ligne pour chaque couple (signature/gene) possible. Nous allons utiliser les *gene sets* de la base de donnees [MSigDB](https://www.gsea-msigdb.org/gsea/msigdb/index.jsp) ou nous nous concentrerons sur les signatures moleculaires des types cellulaires (Categorie `C8`) et [CellMarker](http://bio-bigdata.hrbmu.edu.cn/CellMarker/) une autre base de donnees qui nous fournis des liste de genes specifiques pour des types cellulaires.
+
+Les resultats seront debattus une fois que nous aurons realise l'analyse pour les deux bases de donnees.
+
+##### Molecular Signature Database (MSigDB)
+
+La base de donnees MSigDB du Broad Institute contient plusieurs collections de signatures moleculaires :
+
+- `H` ou *HallMarks gene sets* : Ensemble de set de genes qui co-expriment lors de processus ou etats biologiques identifies par rapport aux autres collections
+- `C1` ou *Positional gene sets* : Ensemble de set de genes basee sur leur position cytogenetique et chromosomique
+- `C2` ou *Curated gene sets* : Ensemble de set de genes retrouves sur les bases de donnees et dans la literature scientifique
+    - Biocarta
+    - KEGG
+    - PID
+    - Reactome
+    - WikiPathways
+- `C3` ou *Regulatory target gene sets* : Ensemble de genes target potentiels de microRNA (MIR) ou facteurs de transcription (TFT)
+    - MIR : prediction miRDB
+    - TFT : prediction basee sur le travail de Kolmykov et al. 2021 et Xie et al. 2005
+- `C4` ou *Computational gene sets* : Ensemble de genes base sur deux papiers de microarrays plutot oriente cancerologie (Subramanian, Tamayo et al. 2005 et Segal et al. 2004) qui ont engendre plus de 800 *gene sets*. 
+- `C5` ou *Ontology gene sets* : Ensemble de genes base sur des bases de donnees d'ontologie.
+    - Gene Ontology (GO) : MF, CC, BP
+    - Human Phenotype Ontology (HPO)
+- `C6` ou *Oncogenic signature gene sets* : Ensemble de genes bases sur des resultats de microarrays principalement concernant des voies qui sont souvent deregulees lors des cancers
+- `C7` ou *Immunologic signature gene sets* : Ensemble de gene base sur des bases de donnees du systeme immunitaire et de ses eventuelles perturbations.
+    - ImmuneSigDB (humain + souris)
+    - VAX : curee par le Human Immunology Project Consortium (HIPC)
+- `C8` ou *Cell type signature gene sets* : Ensemble de sets de genes correspondant aux marqueurs de types cellulaires definis principalement lors d'analyse single cells
+
+Le package R `msigdbr` permet de pouvoir interroger directement la base de donnees. Avec la fonction `msigdbr` on choisit la collection `C8` afin d'obtenir les set de genes correspondant a des lignees cellulaires humaines.
+
+Nous allons donc appliquer la fonction `GSEA` pour chacun des clusters grace a un `lapply`. Pour chaque cluster : 
+
+- On filtre le dataframe du resultat des marqueurs non filtre pour ne recuperer que les lignes concernant les genes deregules par les cellules du cluster.
+- On lance la fonction `GSEA` pour obtenir les signatures enrichies dans le set de genes marqueurs
+- On ajoute le nom du cluster dans une nouvelle colonne au dataframe resultant
+- On visualise les resultats avec la fonction `gseaplot2` du package `enrichR` qui permet de visualiser les 3 premieres signatures
+
+```{r clusterGSEA, fig.height = 3}
+
+## Retrieve MSigDB Database for human cell types signatures gene sets
+C8_t2g <- msigdbr(species = "Homo sapiens", category = "C8") %>% 
+  dplyr::select(gs_name, ensembl_gene)
+
+paged_table(head(C8_t2g, 30))
+
+## Apply GSEA for each cluster
+GSEA_list <- lapply(levels(pbmc_markers_annotated$cluster), function(cluster_name){
+  
+  res_markers <- subset(pbmc_markers_annotated, cluster == cluster_name)                   #Filter markers dataframe by cluster
+  
+  ## Generate named vector of ranked gene mandatory for GSEA analysis that take into account DE and significativity
+  geneList_byclus <- sign(res_markers$avg_log2FC) * -log10(ifelse(res_markers$p_val == 0,  #Deal with pval = 0
+                                                                  1e-323,                  #Smallest interpretable number
+                                                                  res_markers$p_val))
+  names(geneList_byclus) <- res_markers$gene
+  
+  ## Order by avg log FC and significativity
+  geneList_byclus <- sort(geneList_byclus, decreasing = TRUE)
+  
+  ## Perform GSEA analysis
+  gseaC8 <- GSEA(geneList_byclus, TERM2GENE = C8_t2g)
+  gseaC8@result$cluster <- cluster_name #add cluster name as column
+  
+  ## Add plot
+  # print(ridgeplot(gseaC8, 
+  #                 showCategory = 3, 
+  #                 orderBy = "NES") +
+  #         ggtitle(paste("Cluster", cluster_name)) +
+  #         theme(axis.text.y = element_text(size = 10),
+  #               legend.key.size = unit(0.2, 'cm')))
+  
+  print(gseaplot2(gseaC8, 
+                  geneSetID = rownames(gseaC8@result %>% 
+                                         arrange(desc(NES)))[1:ifelse(nrow(gseaC8) < 3,
+                                                                      nrow(gseaC8),
+                                                                      3)],
+                  base_size = 8, 
+                  pvalue_table = TRUE,
+                  subplots = 1:2,
+                  title = paste("Cluster", cluster_name)))
+  
+  return(gseaC8@result) #Return dataframe result
+})
+
+## Concatenate all results in one dataframe
+GSEA_res <- do.call("rbind", GSEA_list)
+
+## Group result by cluster (easier to manipulate with dplyr)
+GSEA_res <- GSEA_res %>% 
+  group_by(cluster)
+
+## Visualize first 3 signatures for each cluster (removing the vector of genes just for the visualization and the description that match ID column for this dataset MSigDB)
+paged_table(top_n(x= GSEA_res, n = 3, wt = NES)[, -c(2,11)])
+
+```
+
+##### CellMarkers
+
+Cell Marker est une base de donnees curee a la main a partir de la literature scientifique et diverses autres ressources pour decrire plus de 400 types cellulaires (humain et souris uniquement). On recuperera les marqueurs cellulaires chez l'Humain directement sur le site de Cell Marker.
+
+Apres avoir manipulé les donnees pour formater un dataframe de deux colonnes ou la premiere est le nom du terme et la deuxieme colonne le nom du gene associe a ce terme. 
+
+Nous allons donc appliquer la fonction `GSEA` pour chacun des clusters grace a un `lapply`. Pour chaque cluster : 
+
+- On filtre le dataframe du resultat des marqueurs non filtre pour ne recuperer que les lignes concernant les genes deregules par les cellules du cluster.
+- On lance la fonction `GSEA` pour obtenir les signatures enrichies dans le set de genes marqueurs
+- On ajoute le nom du cluster dans une nouvelle colonne au dataframe resultant
+- On visualise les resultats avec la fonction `gseaplot2` du package `enrichR` qui permet de visualiser les 5 premieres signatures
+
+```{r clusterGSEACM, fig.height = 3}
+
+## Retrieve Cell Markers Database for human cell types signatures gene sets
+cell_marker_data <- vroom::vroom('http://bio-bigdata.hrbmu.edu.cn/CellMarker/download/Human_cell_markers.txt')
+
+## Instead of `cellName`, users can use other features (e.g. `cancerType`)
+cells <- cell_marker_data %>%                                           
+    dplyr::select(cellName, geneSymbol) %>%                            #Select only the two columns
+    dplyr::mutate(geneSymbol = strsplit(geneSymbol, ', ')) %>%         #Split gene names based on the comma
+    tidyr::unnest()                                                    #Flatten gene vector in order to have a line for each gene in terme
+
+## Remove [ and ] found in gene names due to the Cell Marker annotation
+cells$geneSymbol <- gsub("\\[|\\]",
+                         "",
+                         cells$geneSymbol,
+                         fixed = FALSE)
+
+paged_table(head(cell_marker_data, 30))
+
+## Apply GSEA for each cluster
+GSEA_CM_list <- lapply(levels(pbmc_markers_annotated$cluster), function(cluster_name){
+  
+  res_markers <- subset(pbmc_markers_annotated, cluster == cluster_name)                     #Filter markers dataframe by cluster
+  
+  ## Generate named vector of ranked gene mandatory for GSEA analysis that take into account DE importance and significativity
+  geneList_byclus <- sign(res_markers$avg_log2FC) * -log10(ifelse(res_markers$p_val == 0,    #Deal with pval = 0
+                                                                  1e-323,                    #Smallest interpretable number
+                                                                  res_markers$p_val))
+  names(geneList_byclus) <- res_markers$external_gene_name
+  
+  ## Order by avg log FC and significativity
+  geneList_byclus <- sort(geneList_byclus, decreasing = TRUE)
+  
+  ## Perform GSEA analysis
+  gseaCM <- GSEA(geneList_byclus, TERM2GENE = cells)
+  gseaCM@result$cluster <- cluster_name #add cluster name as column
+  
+  ## Add plot
+  # print(ridgeplot(gseaCM, 
+  #                 showCategory = 5, 
+  #                 orderBy = "NES") +
+  #         ggtitle(paste("Cluster", cluster_name)) +
+  #         theme(axis.text.y = element_text(size = 10),
+  #               legend.key.size = unit(0.2, 'cm')))
+  
+  print(gseaplot2(gseaCM, 
+                  geneSetID = rownames(gseaCM@result %>% 
+                                         arrange(desc(NES)))[1:ifelse(nrow(gseaCM) < 3, 
+                                                                      nrow(gseaCM), 
+                                                                      3)],
+                  base_size = 8,
+                  pvalue_table = TRUE, 
+                  subplots = 1:2,
+                  title = paste("Cluster", cluster_name)))
+  
+  return(gseaCM@result) #Return dataframe result
+})
+
+## Concatenate all results in one dataframe
+GSEA_CM_res <- do.call("rbind", GSEA_CM_list)
+
+## Group result by cluster (easier to manipulate with dplyr)
+GSEA_CM_res <- GSEA_CM_res %>% 
+  group_by(cluster)
+
+## Visualise first 3 signatures for each cluster (removing the vector of genes just for the visualisation and the description that match ID column for this dataset MSigDB)
+paged_table(top_n(x= GSEA_CM_res, n = 3, wt = NES)[, -c(2,11)])
+
+```
+
+#### Analyse des resultats d'enrichissement
+
+Les differents plots de GSEA representent les trois premieres signatures pour lesquelles nous avons eu les score d'enrichissement les plus importants. On peut suivre l'incrementation du score sur le panel superieur. La position des genes de la signature est montree sur le panel du bas. Pour chacune des trois signatures on montre aussi dans un tableau la p-valeur et la p-valeur ajustee. 
+
+Beaucoup de resultats confortent ce qu'on avait deja observe avec les analyses de sur-representation : 
+
+- le **cluster 0** serait compose de cellules T naives (soit CD4+ pour MSigDB ou CD8+ pour CellMarker) 
+- le **cluster 1** representerait les monocytes tout comme le **cluster 5** qui est proche sur la UMAP cependant les analyses d'enrichissement n'arrivent pas a detecter leur difference, il faudrait investiguer l'integralite des resultats de ClusterProfiler pour les differentier
+- le **cluster 2** serait compose de cellules T CD4+ considerees comme naives pour MSigDB (encore une fois les cellules du cluster 2 sont tres proches sur la UMAP de celles du cluster 0)
+- le **cluster 3** est toujours relie aux cellules B
+- le **cluster 4** et le **cluster 6** (tres proches sur la UMAP) sont encore considere comme compose de cellules NK. Cependant les deux bases de donnees ont aussi detecte que le cluster 4 pourrait etre compose de cellules T CD8+
+- les cellules du **cluster 7** seraient des cellules dentritiques.
+- le **cluster 8** serait compose des megacaryocytes qui sont definies comme etant des cellules a l'origine de la formation des plaquettes ce qui conforte les precedents resultats. En revanche CellMarker ne permet pas de statuer sur ce cluster puisqu'il n'y a qu'une signature qui ressort significative et que l'enrichissement de celle ci est negative. 
+
+Les analyses d'enrichissement sont enormement dependantes de la signature dont on mesure l'enrichissement ou la sur-representation. Si les signatures sont trop generiques ou alors base sur quelque chose de trop eloigne de notre dataset (ici nous etions sur des cellules sanguines) alors il sera difficile d'avoir des resultats qui feront sens des le premier coup. Il faudra alors plutot privilegier vos propres signatures ou gene marqueurs pour identifier vos populations. Ces analyses vous permettent cependant de vous aiguiller dans votre analyse et l'exploration de vos donnees.
+
+### Annotation des clusters
+
+On commence a avoir une idee plus precise de l'identite de nos clusters ! Nous allons *tricher* avec le tutoriel de Seurat qui nous donne directement les marqueurs des populations cellulaires qui permettent d'identifier les clusters :
+
+```{r, fig.height = 10, results = 'asis'}
+
+kable(data.frame(Marker = c("IL7R, CCR7", "CD14, LYZ", "IL7R, S100A4", "MS4A1", "CD8A", "FCGR3A, MS4A7", "GNLY, NKG7", "FCER1A, CST3", "PPBP"),
+                 CellType = c("Naive CD4+ T", "CD14+ Mono", "Memory CD4+", "B cells", "CD8+ T", "FCGR3A+ Mono", "NK", "DC", "Platelet"),
+                 Cluster = 0:8), caption = "Identification of clusters based on specific cell types")
+
+
+
+## Retrieve specific markers based on their gene name
+markers_pop <- subset(annotated_hg19, 
+                      subset = external_gene_name %in% 
+                        c("CCR7",                                #Naive CD4+ T
+                          "CD14",                                #CD14+ Mono
+                          "S100A4",                              #Memory CD4+
+                          "MS4A1",                               #B
+                          "CD8A",                                #CD8+ T
+                          "FCGR3A",                              #FCGR3A+ Mono
+                          "NKG7",                                #NK
+                          "CST3",                                #DC
+                          "PPBP"))                               #Platelet
+
+## Generate violin plots and stock them into variable
+vln_plots <- VlnPlot(pbmc_small,                                 #SeuratObject
+                     features = markers_pop$ensembl_gene_id,     #Vector of genes to plot
+                     combine = FALSE)                            #Return list of plot objets instead of a combined plot (easier to process)
+
+## Add gene name as title
+vln_plots <- lapply(vln_plots,                                   #List of plots
+                    add_title_gene_name,                         #Function to apply to the list
+                    gene_format = annotated_hg19)                #Fill in the dataframe parameter
+
+## Remove unecessary legend
+vln_plots <- lapply(vln_plots, function(plot){
+  plot <- plot + theme(legend.position = "none")
+  return(plot)
+})
+
+## Plot list of plots
+grid.arrange(grobs = vln_plots)
+```
+
+
+Nous avons donc reussi a identifier une grande partie des clusters avec les analyses d'enrichissement. Maintenant que l'on sait quel cluster est quel type cellulaire nous allons renommer les identites des cellules dans l'objet Seurat.
+
+Pour cela nous allons utiliser la fonction `RenameIdents` ou on lui fournit un correspondance entre les anciennes identites actives (numero de cluster : `0, 1, 2,...`) aux nouvelles identites (noms des differents types cellulaires) via un vecteur nomme (*named vector*).
+
+```{r RenameIdents}
+
+## Vector of new cluster labels         #Correspond to cluster :
+new_cluster_ids <- c("Naive CD4+ T",    #0
+                     "CD14+ Mono",      #1
+                     "Memory CD4+",     #2
+                     "B",               #3
+                     "CD8+ T",          #4
+                     "FCGR3A+ Mono",    #5
+                     "NK",              #6
+                     "DC",              #7
+                     "Platelet")        #8
+
+## Create a named vector with the actual cell identifiers
+names(new_cluster_ids) <- levels(pbmc_small)
+
+## Renamed cell identities in the Seurat Object
+pbmc_small <- RenameIdents(pbmc_small, new_cluster_ids)
+
+## Plot
+UMAPPlot(pbmc_small, 
+         label = TRUE, 
+         pt.size = 0.5)
+
+```
+
+### Comparaison de deux populations
+
+Une derniere chose que l'on pourrait se demander est qu'est ce qu'il differentie deux populations. Cela pourrait etre deux conditions ou meme deux clusters. C'est possible avec la fonction `FindMarkers` qui fonctionne presque comme `FindAllMarkers` puisque celle ci fait appel a la premiere. Beaucoup de parametres sont equivalents, cependant `FindMarkers` permet de realiser une analyse differentielle d'expression entre deux populations qui sont definies avec les parametres `ident.1` et `ident.2`. Par defaut, ce sont des identite de cellules presentes dans l'`active.ident` mais on peut selectionner une autre variable contenue dans les metadata grace au parametre `group.by`. Ainsi si nous voulons etudier l'impact du sexe dans les cellules du platelet alors on lancerait : `FindMarkers(nomobjet, ident.1 = "female", ident.2 = "male", group.by = "sex", subset.ident = "Platelet")` (si nous avions une colonne "sex" dans le slot des metadata). Si on veut etudier l'impact du sexe dans toutes les cellules alors on laisse le parametre `subset.ident` par defaut (c'est a dire `NULL`). 
+
+Ici nous allons tester la difference entre nos clusters NK et CD8+ T qui ont ete tres difficile a differentier. Les resultats sont similaires a `FindAllMarkers` a la difference ou il n'y a pas de colonne `gene` car comme on realise qu'une analyse differentielle il ne sera pas possible d'avoir un gene a la fois surexprimes dans les NK et dans les cellules T CD8+. 
+
+```{r FindMarkers}
+
+NK_CD8_diff_markers <- FindMarkers(pbmc_small, 
+                           ident.1 = "NK", 
+                           ident.2 = "CD8+ T")
+
+## Merge markers results with biomart annotation
+NK_CD8_diff_markers_annotated <- merge(x = NK_CD8_diff_markers,  #First df to merge
+                                       y = annotated_hg19,       #Second df to merge
+                                       by.x = 0,                 #Column name of first df used for matching lines, 0 for rownames
+                                       by.y = "ensembl_gene_id", #Column name of second df used for matching lines
+                                       all.x = TRUE)             #Keep all lines from first df even if there is no match with second df
+
+## Filter dataset based on Fold change and p-value adjusted
+NK_CD8_diff_markers_annotated_signif <- subset(NK_CD8_diff_markers_annotated,
+                                               p_val_adj < 0.05 & 
+                                                 abs(avg_log2FC) >= 0.25)       #Filter dataframe based on p_val_adj column
+
+## Sorting results by average log2(Fold Change)
+NK_CD8_diff_markers_annotated_signif <- NK_CD8_diff_markers_annotated_signif %>%                 #Rearrange df with dplyr package
+  arrange(desc(avg_log2FC))                  #Sort lines by descending the column avg_log2FC and by group
+
+## Most DE gene marker for each cluster
+paged_table(NK_CD8_diff_markers_annotated_signif[(c(1:3, (nrow(NK_CD8_diff_markers_annotated_signif)-2):nrow(NK_CD8_diff_markers_annotated_signif))),])
+
+```
+
+Voici les resultats pour les trois genes les plus sur-exprimes dans les cellules NK (`avg_log2FC` positif) et les 3 genes les plus surexprimes dans les cellules T CD8+ (`avg_log2FC` negatif). 
+
+Vous pouvez totalement utiliser les differentes methodes d'analyse de groupes de genes sur celle-ci. 
+
 ## Visualisations
+
+Il y a beaucoup de visualisations possibles via Seurat :
+
+- Nuage de points des cellules dans un espace dimensionnel reduit : 
+    - `DimPlot` et les fonctions qui en decoulent (`PCAPlot`, `UMAPPlot`, `TSNEPlot`) colorent les cellules avec des variables categorielles (clustering aux differentes resolutions et autres colonnes dans les metadata qui contiendraient une variable aux valeurs discretes)
+    - `FeaturePlot` qui colore les cellules selon des variables continues (Expression de genes, score, etc...)
+- Violin plots qui visualisent les cellules selon des variables continues
+- Heatmap pour visualiser soit des niveaux d'expression ou autres variables continues
+    - Attention toutefois a la visualisation car c'est le slot `nomobjet@assays$RNA@scale.data` qui est utilise donc par defaut nous avons l'information que pour les HVG. 
+- `DotPlot` qui permet de visualiser l'expression des genes en fonction d'un ou plusieurs genes pour chacune des identites de cellules. C'est sous la forme de point plus ou moins grand selon le pourcentage de detection du gene dans l'identite avec une colorimetrie suivant la moyenne d'expression du gene dans l'identite de la cellule (ici les differents clusters)
+
+Il y a beaucoup de parametres communs a ces fonctions de visualisations : 
+
+- `group.by` : vecteur de chaine de caractere contenant une ou plusieurs variable(s) categorielle(s) utilisee(s) pour colorer les cellules. Cela peut etre le nom d'une colonne dans les metadata
+- `split.by` : chaine de caractere d'une variable categorielle utilise pour separer les cellules. En renseignant ce parametre il y aura un plot pour chaque valeur de cette variable. Cela peut etre le nom d'une colonne dans les metadata
+- `shape.by` : chaine de caractere d'une variable categorielle utilise pour changer la forme des cellules. Cela peut etre le nom d'une colonne dans les metadata
+- `features` : vecteur de chaine de caractere contenant une ou plusieurs variable(s) continue(s) utilisee(s) pour colorer les cellules. Cela peut etre le nom d'une colonne dans les metadata ou le nom d'un gene dans la matrice d'expression
+- `label` : c'est un logique (TRUE ou FALSE) qui permet de decider si oui ou non vous voulez ajouter sur le plot le noms des `Idents(nomobjet)` 
+- `repel` : c'est un logique qui couple a `label` empeche au maximum la superposition des noms des groupes des cellules sur le plot
+- `blend` : c'est un logique qui lors de l'utilisation de `FeaturePlot` avec deux genes permet de visualiser dans un troisieme panel la co-expression de ceux-ci
+- `pt.size` : valeur numerique permettant de changer la taille du point sur le plot
+- `cells` : vecteur de chaine de caractere avec les noms de vos barcodes des cellules que vous voulez visualiser. Par defaut toutes les cellules sont plottees.
+- `reduction` : chaine de caractere qui permet de selectionner l'espace dimensionnel reduit choisi present dans le slot `nomobjet@reductions`. 
+
+Ce sont les principaux parametres de fonctions ou vous trouverez ci-apres quelques exemples en pratique. Je vous encourage fortement a aller regarder la documentation de chacune de ces fonctions pour vous rendre compte du panel des possibilites pour vous permettre de faire les figures que vous voulez.
+
+```{r Vis}
+## Visualize cells in UMAP coordinates where cells are colored by a certain clustering
+UMAPPlot(pbmc_small,                                                           #SeuratObject
+         group.by = "RNA_snn_res.0.4")                                         #Color cells based on different cell metadata
+
+## Visualize cells in UMAP coordinates where cells are colored by two kind of variable separetely
+UMAPPlot(pbmc_small,                                                           #SeuratObject
+         group.by = c("RNA_snn_res.0.4", "RNA_snn_res.1.2"))                   #Color cells based on different cell metadata
+
+## Visualize cells in UMAP coordinates where cells are splitted in different panels based on a variable
+UMAPPlot(pbmc_small,                                                           #SeuratObject
+         split.by = "RNA_snn_res.0.2")                                         #Separated cells based on a cell metadata variable
+
+## Visualize cells in UMAP coordinates and adding cluster labels directly on the plot 
+UMAPPlot(pbmc_small,                                                           #SeuratObject
+         label = TRUE,                                                         #Print cell identities directly on the plot
+         repel = TRUE)                                                         #Avoid overlap of cell labels
+
+## Dotplot to visualize target genes expression in the different cell identities 
+DotPlot(pbmc_small,                                                            #SeuratObject
+        features = markers_pop$ensembl_gene_id,                                #Feature expression to plot
+        cols = c("yellow", "red")) +                                           #Change expression color scale
+  scale_x_discrete(labels = markers_pop$external_gene_name)                    #Change labels to print gene names instead of ensembl gene id
+
+## Heatmap
+DoHeatmap(pbmc_small,                                                          #SeuratObject
+          features = markers_pop$ensembl_gene_id)                              #Feature expression to plot
+
+## Visualize cells in UMAP coordinates where cells are colored by a continuous variable (here two expression genes)
+FeaturePlot(pbmc_small,                                                        #SeuratObject
+            features = c("ENSG00000126353", "ENSG00000168685"),                #Feature expression to plot
+            cells = colnames(subset(pbmc_small, idents = "Naive CD4+ T")),     #Plot only Naive CD4+ T cells
+            cols = c("white", "orange", "darkblue"),                           #Change color for the blend : first color : no expression, 2nd : expressed first gene, 3rd color : expressed gene 2
+            blend = TRUE)                                                      #See the coexpression of the two genes
+
+```
+
+La visualisation du `FeaturePlot` avec `blend = TRUE` nous montre 4 panels. Le premier visualise le niveau d'expression du gene 1, le deuxieme panel, le niveau d'expression du second gene. Les deux derniers panels nous permettent de comprendre la co-expression grace a la matrice de couleur. Si la cellule exprime aucun des deux genes alors elle apparaitra blanche, si elle n'exprime que le premier gene elle apparaitra dans un degrade d'orange selon le niveau d'expression. A l'inverse, si elle exprime seulement le deuxieme gene cela sera un degrade de bleu. Et si elle exprime les deux genes, la couleur qu'elle prendra sera un melange d'orange, de bleu et de blanc selon la balance entre les deux niveau d'expression
+
+
+## References
+
+\doi{10.1016/j.cell.2019.05.031}
+\doi{10.1093/bioinformatics/btu674}
+\doi{10.1073/pnas.0506580102}
+\doi{10.1038/ng1180}
+\doi{10.1093/bioinformatics/btr260}
+\doi{10.1093/nar/gkaa1113}
+\doi{10.1038/75556}
+\doi{10.1093/nar/28.1.27}
+\doi{10.1002/pro.3715}
+\doi{10.1093/nar/gkaa970}
+\doi{10.1093/nar/gky900}
+
+```{r SessionInfo, results='markup'}
+sessionInfo()
+```
+
+
